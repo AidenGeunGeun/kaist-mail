@@ -26,6 +26,8 @@ pub struct Item {
 struct MailSummary {
     flags: Flags,
     #[serde(default)]
+    sent_at: Option<String>,
+    #[serde(default)]
     preview_text: Option<String>,
 }
 
@@ -74,9 +76,17 @@ pub struct Summary {
     folder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
-    /// `at` in Unix seconds, the order continuation keys on.
+    /// Unix seconds of the time the query orders by, which continuation keys on.
     #[serde(skip)]
     pub time: i64,
+}
+
+/// The time Dooray orders a query by: `list` by received time, `search` by
+/// sent time (the Date header), falling back to received time without one.
+#[derive(Clone, Copy)]
+pub enum Order {
+    Received,
+    Sent,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -89,10 +99,18 @@ impl Item {
     }
 
     /// The row, with `folder` named by the caller and the preview kept on request.
-    pub fn summary(self, folder: Option<String>, preview: bool) -> Result<Summary, AppError> {
-        let time = time::parse_rfc3339(&self.created_at).ok_or_else(|| {
-            AppError::shape("Dooray listed a message without an RFC 3339 received time")
-        })?;
+    pub fn summary(
+        self,
+        order: Order,
+        folder: Option<String>,
+        preview: bool,
+    ) -> Result<Summary, AppError> {
+        let key = match (order, &self.mail_summary.sent_at) {
+            (Order::Sent, Some(sent)) => sent,
+            _ => &self.created_at,
+        };
+        let time = time::parse_rfc3339(key)
+            .ok_or_else(|| AppError::shape("Dooray listed a message without an RFC 3339 time"))?;
         let from = match self.users.from.and_then(|from| from.email_user) {
             Some(EmailUser {
                 name: Some(name),

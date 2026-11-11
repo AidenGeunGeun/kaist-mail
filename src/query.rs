@@ -12,7 +12,7 @@ use crate::{
     cli::{PageArgs, SearchArgs},
     client::Client,
     error::AppError,
-    message::{self, Item, Summary},
+    message::{self, Item, Order, Summary},
     output::{self, CommandResult, ListMeta},
     time,
 };
@@ -23,7 +23,7 @@ const SEARCH_CAP: u64 = 2000;
 const STEP: u64 = 100;
 /// Dooray calls one page may take before the cursor is declared too stale.
 const MAX_CALLS: u64 = 10;
-/// Messages shown at one received second that a cursor can carry. Dooray
+/// Messages shown at one second of the order that a cursor can carry. Dooray
 /// orders a second's messages arbitrarily, so continuing inside one means
 /// rereading all of them; past this many, the query must be narrowed.
 const MAX_SEEN: usize = 100;
@@ -71,7 +71,7 @@ pub fn term(value: &str) -> Result<String, String> {
 }
 
 /// A position in a newest-first message order: just after the message
-/// received at `time` whose id is last in `seen`. `seen` lists every message
+/// ordered at `time` whose id is last in `seen`. `seen` lists every message
 /// shown at that second, so equal timestamps neither repeat nor vanish;
 /// `offset` is where the next message stood, a hint for page-number paging.
 #[derive(Clone)]
@@ -107,7 +107,7 @@ impl Cursor {
             .collect::<Vec<_>>();
         if seen.len() > MAX_SEEN {
             return Err(AppError::limit(format!(
-                "more than {MAX_SEEN} messages share the received time {}, past which kaist-mail cannot page reliably",
+                "more than {MAX_SEEN} messages share the time {}, past which kaist-mail cannot page reliably",
                 time::format_korea(time)
             ))
             .with_hint("Narrow the query, for example with search --from, --subject or --before."));
@@ -165,19 +165,21 @@ struct Listed {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Found {
-    total_count: u64,
-    contents: Vec<Hit>,
-    references: References,
-}
-
-#[derive(Deserialize)]
 struct Hit {
     id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Found {
+    total_count: u64,
+    contents: Vec<Hit>,
+    /// Absent when nothing matched.
+    #[serde(default)]
+    references: References,
+}
+
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct References {
     #[serde(default)]
@@ -223,7 +225,7 @@ pub fn list(client: &Client, args: &PageArgs) -> Result<CommandResult, AppError>
         let rows = listed
             .contents
             .into_iter()
-            .map(|item| item.summary(None, args.preview))
+            .map(|item| item.summary(Order::Received, None, args.preview))
             .collect::<Result<_, _>>()?;
         Ok((rows, listed.total_count))
     };
@@ -260,7 +262,7 @@ fn list_page(
         ))
     };
     // Start before every message shown at the cursor's second: only a row
-    // received later proves that no unshown message of that second precedes it.
+    // ordered later proves that no unshown message of that second precedes it.
     let behind = cursor.map_or(0, |cursor| cursor.seen.len() as u64 + 1);
     let mut start = cursor.map_or(0, |cursor| cursor.offset.saturating_sub(behind));
     let (mut rows, mut total) = range(start, limit + behind)?;
@@ -382,7 +384,7 @@ pub fn search(client: &Client, args: &SearchArgs) -> Result<CommandResult, AppEr
                         .get(id)
                         .map_or_else(|| id.to_owned(), |folder| folder.name.clone())
                 });
-                item.summary(folder, *preview)
+                item.summary(Order::Sent, folder, *preview)
             })
             .collect::<Result<_, _>>()?;
         Ok((rows, found.total_count))
@@ -392,7 +394,7 @@ pub fn search(client: &Client, args: &SearchArgs) -> Result<CommandResult, AppEr
     render("search", page, capped)
 }
 
-/// One page of a newest-first search received in `[since, before)`. Each
+/// One page of a newest-first search sent in `[since, before)`. Each
 /// continuation searches again with `before` just past the cursor's second,
 /// from Dooray's first page, so no page lies past Dooray's 2000-hit cap and
 /// messages that left the result in between move nothing.
@@ -426,7 +428,7 @@ fn search_page(
         for row in &rows {
             if row.time > latest {
                 return Err(AppError::shape(
-                    "Dooray search results are not ordered by received time",
+                    "Dooray search results are not ordered by sent time",
                 ));
             }
             latest = row.time;
@@ -499,7 +501,7 @@ mod tests {
             "users": {},
         }))
         .unwrap();
-        item.summary(None, false).unwrap()
+        item.summary(Order::Received, None, false).unwrap()
     }
 
     #[test]

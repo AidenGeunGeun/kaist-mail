@@ -15,6 +15,7 @@ const SEARCH: &str = include_str!("../fixtures/mails-search.json");
 struct Message {
     id: String,
     at: String,
+    sent: String,
     sender: (&'static str, &'static str),
     subject: String,
     body: &'static str,
@@ -61,6 +62,8 @@ fn messages(count: usize) -> Vec<Message> {
             Message {
                 id: format!("{}", 4_470_000_000_000_000_000_u64 - index as u64),
                 at: stamp(if (15..45).contains(&index) { 15 } else { index }),
+                // Sent 0-90 minutes before it was received.
+                sent: stamp(index + 3 * (index % 4)),
                 sender,
                 subject,
                 body,
@@ -89,6 +92,7 @@ fn item(message: &Message) -> Value {
         serde_json::from_str::<Value>(LIST).unwrap()["result"]["contents"][0].clone();
     item["id"] = json!(message.id);
     item["createdAt"] = json!(message.at);
+    item["mailSummary"]["sentAt"] = json!(message.sent);
     item["subject"] = json!(message.subject);
     item["fileCount"] = json!(0);
     item["folderId"] = json!(folder_id(message.folder));
@@ -108,9 +112,8 @@ fn contains(text: &str, term: &Value) -> bool {
         .contains(&term.as_str().unwrap().to_lowercase())
 }
 
-/// Search as these tests assume Dooray runs it: every term matches, `since`
-/// and `before` are inclusive on the received time (the reading that needs
-/// local filtering for an exclusive `--before`), newest first,
+/// Search as Dooray runs it: every term matches, `since` and `before` are
+/// both inclusive on the sent time, hits are ordered by it, newest first,
 /// counted and paged only through the first 2000 hits.
 fn search(mailbox: &[Message], body: &Value) -> Response {
     let bound = |key: &str| {
@@ -153,11 +156,11 @@ fn search(mailbox: &[Message], body: &Value) -> Response {
                 && body
                     .get("seenFlag")
                     .is_none_or(|seen| *seen == json!(!message.unread))
-                && since.as_ref().is_none_or(|since| message.at >= *since)
-                && before.as_ref().is_none_or(|before| message.at <= *before)
+                && since.as_ref().is_none_or(|since| message.sent >= *since)
+                && before.as_ref().is_none_or(|before| message.sent <= *before)
         })
-        .take(2000)
         .collect();
+    let hits: Vec<&Message> = by_sent(hits).into_iter().take(2000).collect();
     let (page, size) = (
         body["page"].as_u64().unwrap() as usize,
         body["size"].as_u64().unwrap() as usize,
@@ -173,14 +176,27 @@ fn search(mailbox: &[Message], body: &Value) -> Response {
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
-    envelope_of(json!({
+    let mut result = json!({
         "totalCount": hits.len(),
-        "contents": shown.iter().map(|message| json!({"id": message.id, "subject": message.subject, "sentAt": message.at})).collect::<Vec<_>>(),
-        "references": {
+        "contents": shown.iter().map(|message| json!({"id": message.id, "subject": message.subject, "sentAt": "1970-01-01T09:00:00+09:00"})).collect::<Vec<_>>(),
+    });
+    if !shown.is_empty() {
+        result["references"] = json!({
             "mailMap": shown.iter().map(|message| (message.id.clone(), item(message))).collect::<serde_json::Map<_, _>>(),
             "folderMap": folder_map,
-        },
-    }))
+        });
+    }
+    envelope_of(result)
+}
+
+/// Newest sent first; messages sent at the same second keep their order.
+fn by_sent(mut messages: Vec<&Message>) -> Vec<&Message> {
+    messages.sort_by(|a, b| b.sent.cmp(&a.sent));
+    messages
+}
+
+fn ids_of(messages: Vec<&Message>) -> Vec<String> {
+    messages.iter().map(|message| message.id.clone()).collect()
 }
 
 fn list(mailbox: &[Message], target: &str) -> Response {
@@ -331,9 +347,10 @@ fn unread_triage_shows_each_unread_message_once_while_reading_and_arrivals_chang
         }
         if pages == 2 {
             let mut arrival = messages(1).remove(0);
-            (arrival.id, arrival.at, arrival.unread) = (
+            (arrival.id, arrival.at, arrival.sent, arrival.unread) = (
                 "4480000000000000000".into(),
                 "2026-11-12T09:00:00+09:00".into(),
+                "2026-11-12T08:59:00+09:00".into(),
                 true,
             );
             mailbox.insert(0, arrival);
@@ -390,14 +407,14 @@ fn search_continues_past_the_2000_hit_cap_in_english_and_korean() {
     let server = dooray(&mailbox);
     let home = Home::new(Some(&live()));
 
-    let seminars: Vec<String> = all
-        .iter()
-        .filter(|message| {
-            message.folder != "trash"
-                && (message.subject.contains("Seminar") || message.body.contains("seminar"))
-        })
-        .map(|message| message.id.clone())
-        .collect();
+    let seminars = ids_of(by_sent(
+        all.iter()
+            .filter(|message| {
+                message.folder != "trash"
+                    && (message.subject.contains("Seminar") || message.body.contains("seminar"))
+            })
+            .collect(),
+    ));
     assert!(seminars.len() > 2100);
     let (ids, first) = walk(&home, &server, &["--json", "search", "SEMINAR"]);
     assert_eq!(first["total"], 2000);
@@ -406,18 +423,22 @@ fn search_continues_past_the_2000_hit_cap_in_english_and_korean() {
     assert_eq!(ids, seminars);
 
     // Decomposed Hangul (as macOS file names carry it) finds the composed subjects.
-    let (since, before) = (stamp(401), stamp(101));
-    let korean: Vec<String> = all
+    let (since, before) = (stamp(404), stamp(112));
+    let korean_unread = |message: &&Message| {
+        message.folder == "inbox" && message.subject.contains("세미나") && message.unread
+    };
+    let korean = ids_of(by_sent(
+        all.iter()
+            .filter(korean_unread)
+            .filter(|message| message.sent >= since && message.sent < before)
+            .collect(),
+    ));
+    let at_before = all
         .iter()
-        .filter(|message| {
-            message.folder == "inbox"
-                && message.subject.contains("세미나")
-                && message.unread
-                && message.at >= since
-                && message.at < before
-        })
-        .map(|message| message.id.clone())
-        .collect();
+        .filter(korean_unread)
+        .filter(|message| message.sent == before)
+        .count();
+    assert_eq!(at_before, 1);
     let decomposed = "\u{1109}\u{1166}\u{1106}\u{1175}\u{1102}\u{1161}";
     let (ids, first) = walk(
         &home,
@@ -441,9 +462,13 @@ fn search_continues_past_the_2000_hit_cap_in_english_and_korean() {
         ],
     );
     assert_eq!(ids, korean);
-    // Dooray's count includes the message at exactly --before; the rows do not.
+    // Dooray's count includes the message sent at exactly --before; the rows do not.
     assert_eq!(first["total"], korean.len() + 1);
     assert_eq!(first.get("total_capped"), None);
+
+    let (ids, first) = page(&home, &server, &["--json", "search", "없는말"], None);
+    assert!(ids.is_empty());
+    assert_eq!(first["total"], 0);
 }
 
 #[test]
@@ -505,7 +530,7 @@ fn list_continuation_finds_unshown_messages_that_moved_ahead_within_a_tied_secon
 fn search_refuses_to_end_silently_inside_a_second_with_too_many_hits() {
     let mut mailbox = messages(2001);
     for message in &mut mailbox[..2000] {
-        (message.at, message.folder) = (stamp(0), "inbox");
+        (message.at, message.sent, message.folder) = (stamp(0), stamp(0), "inbox");
     }
     mailbox[2000].folder = "inbox";
     let mailbox: Mailbox = Arc::new(Mutex::new(mailbox));

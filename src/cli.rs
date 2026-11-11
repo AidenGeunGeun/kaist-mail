@@ -88,7 +88,7 @@ pub enum Command {
     List(PageArgs),
     /// Search messages by sender, recipient, subject, body, attachment name or date.
     #[command(
-        long_about = "Search messages on Dooray's server, newest first, as thin rows. Every term and field filter must match (AND); a repeated flag adds another term. Matching is a substring match, case-insensitive for ASCII; terms are NFC-normalized and must be under 100 characters. Default scope: every folder except spam and trash. --cursor continues past Dooray's 2000-hit limit.",
+        long_about = "Search messages on Dooray's server, newest sent first, as thin rows. Every term and field filter must match (AND); a repeated flag adds another term. Matching is a substring match, case-insensitive for ASCII; terms are NFC-normalized and must be under 100 characters. Default scope: every folder except spam and trash. --cursor continues past Dooray's 2000-hit limit.",
         after_help = SEARCH_HELP
     )]
     Search(SearchArgs),
@@ -134,10 +134,13 @@ const SEARCH_HELP: &str = concat!(
     rows_help!(),
     "
 
-Dates: --since includes mail received at or after it, --before mail received
-before it. YYYY-MM-DD means midnight Korea time (+09:00); any RFC 3339 time with
-an offset is accepted too. A cursor narrows --before to the last message shown,
-so continuation keeps working past 2000 hits and while mail is read meanwhile.
+Dates: Dooray's search orders and filters by sent time (the Date header), not
+the received time rows show as `at`, which is usually seconds and at times
+hours later. --since includes mail sent at or after it, --before mail sent
+before it. YYYY-MM-DD means midnight Korea time (+09:00); RFC 3339 in whole
+seconds with an offset is accepted too. A cursor narrows --before to the last
+message shown, so continuation keeps working past 2000 hits and while mail is
+read meanwhile.
 
 Examples:
   kaist-mail --json search 수강신청
@@ -207,11 +210,11 @@ pub struct SearchArgs {
     #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
     pub file: Vec<String>,
 
-    /// Received at or after DATE (YYYY-MM-DD, Korea time, or RFC 3339).
+    /// Sent at or after DATE (YYYY-MM-DD, Korea time, or RFC 3339).
     #[arg(long, value_name = "DATE", value_parser = crate::time::parse_bound)]
     pub since: Option<i64>,
 
-    /// Received before DATE (YYYY-MM-DD, Korea time, or RFC 3339).
+    /// Sent before DATE (YYYY-MM-DD, Korea time, or RFC 3339).
     #[arg(long, value_name = "DATE", value_parser = crate::time::parse_bound)]
     pub before: Option<i64>,
 
