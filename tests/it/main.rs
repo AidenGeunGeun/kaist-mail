@@ -5,6 +5,8 @@
 #[path = "../fixture/server.rs"]
 mod server;
 
+mod query;
+
 use std::{
     fs,
     path::PathBuf,

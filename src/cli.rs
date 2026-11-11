@@ -76,6 +76,139 @@ pub enum Command {
         after_help = "JSON data: [{id, name, type: system|user, total, unread, parent?}] (parent: the enclosing folder id of a nested user folder); meta: {returned, total}.\n\nExamples:\n  kaist-mail folders\n  kaist-mail --json folders"
     )]
     Folders,
+    /// List the newest messages of one folder (default: inbox), 20 at a time.
+    #[command(
+        long_about = "List one folder's messages newest first, as thin rows: no bodies, recipients or previews unless asked. Filters are Dooray's own: --unread, --favorited, --attachments. There is no date filter here; use `kaist-mail search --since/--before`.",
+        after_help = LIST_HELP
+    )]
+    List(PageArgs),
+    /// Search messages by sender, recipient, subject, body, attachment name or date.
+    #[command(
+        long_about = "Search messages on Dooray's server, newest first, as thin rows. Every term and field filter must match (AND); a repeated flag adds another term. Matching is a substring match, case-insensitive for ASCII; terms are NFC-normalized and must be under 100 characters. Default scope: every folder except spam and trash. --cursor continues past Dooray's 2000-hit limit.",
+        after_help = SEARCH_HELP
+    )]
+    Search(SearchArgs),
+}
+
+macro_rules! rows_help {
+    () => {
+        "JSON data: [{id, at, from, subject, unread?, favorite?, files?, folder?, preview?}]
+  id       Dooray message id; pass it to other commands as is
+  at       received time, RFC 3339 with the account's offset (+09:00 at KAIST)
+  from     \"Name <address>\" or the bare address
+  unread, favorite appear only when true; files (attachment count) only when nonzero;
+  folder   (search without --folder) the system folder name or your folder's name
+  preview  (with --preview) Dooray's plain-text opening, up to about 200 characters
+meta: {returned, total, total_capped?, next_cursor?}
+  total        the query's matches as Dooray counts them (search: first page only)
+  total_capped Dooray stopped counting at 2000; there are at least that many
+  next_cursor  more rows follow: run the same command again with --cursor VALUE;
+               absent when this page is the last. A short page is not the end."
+    };
+}
+
+const LIST_HELP: &str = concat!(
+    rows_help!(),
+    "
+
+Unread triage: run `list --unread`, read what matters, then run the same
+command with --cursor from meta.next_cursor. The cursor continues just after the
+last message shown even though reading removed messages from the unread set and
+new mail arrived; mail newer than the first page needs a run without --cursor.
+
+Examples:
+  kaist-mail --json list --unread
+  kaist-mail --json list --folder sent --limit 50
+  kaist-mail --json list --unread --cursor 20.1794444067.4460000000000000001"
+);
+
+const SEARCH_HELP: &str = concat!(
+    rows_help!(),
+    "
+
+Dates: --since includes mail received at or after it, --before mail received
+before it. YYYY-MM-DD means midnight Korea time (+09:00); any RFC 3339 time with
+an offset is accepted too. A cursor narrows --before to the last message shown,
+so continuation keeps working past 2000 hits and while mail is read meanwhile.
+
+Examples:
+  kaist-mail --json search 수강신청
+  kaist-mail --json search --from academic@kaist.ac.kr --since 2026-09-01
+  kaist-mail --json search --subject seminar --body transformer --before 2026-11-01
+  kaist-mail --json search --file 계획서 --folder inbox"
+);
+
+#[derive(Args)]
+pub struct PageArgs {
+    /// Folder: inbox, sent, draft, archive, spam, trash, or an id from `kaist-mail folders`.
+    #[arg(long, value_name = "FOLDER")]
+    pub folder: Option<crate::query::Folder>,
+
+    /// Only unread messages.
+    #[arg(long)]
+    pub unread: bool,
+
+    /// Only favorited (starred) messages.
+    #[arg(long)]
+    pub favorited: bool,
+
+    /// Only messages with attachments.
+    #[arg(long)]
+    pub attachments: bool,
+
+    /// Rows per page (1-100).
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub limit: u64,
+
+    /// Add each message's preview text (about 200 characters).
+    #[arg(long)]
+    pub preview: bool,
+
+    /// Continue after the previous page: the value of its meta.next_cursor.
+    #[arg(long)]
+    pub cursor: Option<crate::query::Cursor>,
+}
+
+#[derive(Args)]
+pub struct SearchArgs {
+    /// Terms to match in any field (Dooray's all-fields search).
+    #[arg(value_name = "TERM", value_parser = crate::query::term)]
+    pub terms: Vec<String>,
+
+    /// Sender name or address contains TEXT.
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
+    pub from: Vec<String>,
+
+    /// A To recipient contains TEXT.
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
+    pub to: Vec<String>,
+
+    /// A Cc recipient contains TEXT.
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
+    pub cc: Vec<String>,
+
+    /// Subject contains TEXT.
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
+    pub subject: Vec<String>,
+
+    /// Body contains TEXT.
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
+    pub body: Vec<String>,
+
+    /// An attachment's file name contains TEXT.
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::term)]
+    pub file: Vec<String>,
+
+    /// Received at or after DATE (YYYY-MM-DD, Korea time, or RFC 3339).
+    #[arg(long, value_name = "DATE", value_parser = crate::time::parse_bound)]
+    pub since: Option<i64>,
+
+    /// Received before DATE (YYYY-MM-DD, Korea time, or RFC 3339).
+    #[arg(long, value_name = "DATE", value_parser = crate::time::parse_bound)]
+    pub before: Option<i64>,
+
+    #[command(flatten)]
+    pub page: PageArgs,
 }
 
 #[derive(Subcommand)]

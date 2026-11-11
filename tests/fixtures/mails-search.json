@@ -1,0 +1,269 @@
+{
+  "header": {
+    "resultCode": 0,
+    "resultMessage": "",
+    "isSuccessful": true
+  },
+  "result": {
+    "totalCount": 157,
+    "references": {
+      "folderMap": {
+        "3100000000000000001": {
+          "id": "3100000000000000001",
+          "name": "inbox",
+          "type": "system"
+        }
+      },
+      "mailMap": {
+        "4460000000000000001": {
+          "createdAt": "2026-11-12T09:41:07+09:00",
+          "updatedAt": "2026-11-12T09:41:07+09:00",
+          "subject": "[학사] 2026학년도 봄학기 수강신청 안내",
+          "version": 1,
+          "mailSummary": {
+            "priority": 3,
+            "sentAt": "2026-11-12T09:40:55+09:00",
+            "toBeSentAt": null,
+            "toBeSentTimezone": null,
+            "receipts": null,
+            "security": {
+              "level": "normal",
+              "resend": false,
+              "retentionDays": null,
+              "toBeDeletedAt": null,
+              "autoDelete": false
+            },
+            "securityLevel": "normal",
+            "mimeSize": 182345,
+            "saveReason": {
+              "code": null,
+              "category": null
+            },
+            "previewText": "안녕하세요, 학사팀입니다. 2026학년도 봄학기 수강신청 일정을 다음과 같이 안내드립니다. 1. 예비수강신청: 1월 20일(화) 10:00 ~ 1월 22일(목) 17:00 2. 본수강신청: 2월 10일(화) 10:00 ~ 2월 12일(목) 17:00 자세한 사항은 첨부 파일을 참고하시기 바랍니다.",
+            "deliveryState": null,
+            "flags": {
+              "opened": false,
+              "replied": false,
+              "forwarded": false,
+              "sent": false,
+              "calendar": false,
+              "dmarc": false,
+              "delayed": false,
+              "scheduled": false,
+              "canceled": false,
+              "smtpForwarded": false,
+              "securityEditable": false,
+              "individualSend": false,
+              "tnef": false,
+              "reportHacking": false,
+              "dkimPass": true,
+              "approve": false,
+              "auditSecurity": false,
+              "deleted": false,
+              "read": false,
+              "draft": false,
+              "favorite": false
+            }
+          },
+          "threadMail": null,
+          "fileCount": 2,
+          "approval": null,
+          "senderIp": null,
+          "countryCode": "KR",
+          "id": "4460000000000000001",
+          "uid": "91234",
+          "users": {
+            "from": {
+              "type": "emailUser",
+              "emailUser": {
+                "name": "학사팀",
+                "emailAddress": "academic@kaist.ac.kr"
+              }
+            },
+            "envFrom": {
+              "type": "emailUser",
+              "emailUser": {
+                "name": "학사팀",
+                "emailAddress": "academic@kaist.ac.kr"
+              }
+            },
+            "froms": [
+              {
+                "type": "emailUser",
+                "emailUser": {
+                  "name": "학사팀",
+                  "emailAddress": "academic@kaist.ac.kr"
+                }
+              }
+            ],
+            "to": [
+              {
+                "type": "emailUser",
+                "emailUser": {
+                  "name": "홍길동",
+                  "emailAddress": "gildong@kaist.ac.kr"
+                }
+              }
+            ],
+            "cc": [],
+            "bcc": [],
+            "replyTo": [],
+            "more": false
+          },
+          "folderId": "3100000000000000001",
+          "annotations": {
+            "favorited": false
+          }
+        },
+        "4460000000000000003": {
+          "createdAt": "2026-11-10T22:15:00+09:00",
+          "updatedAt": "2026-11-10T22:15:00+09:00",
+          "subject": "Re: 실험 데이터 공유 건",
+          "version": 1,
+          "mailSummary": {
+            "priority": 3,
+            "sentAt": "2026-11-10T22:14:58+09:00",
+            "toBeSentAt": null,
+            "toBeSentTimezone": null,
+            "receipts": null,
+            "security": {
+              "level": "normal",
+              "resend": false,
+              "retentionDays": null,
+              "toBeDeletedAt": null,
+              "autoDelete": false
+            },
+            "securityLevel": "normal",
+            "mimeSize": 6021,
+            "saveReason": {
+              "code": null,
+              "category": null
+            },
+            "previewText": "네, 확인했습니다. 내일 오전 중으로 정리해서 드라이브에 올리겠습니다. 감사합니다.",
+            "deliveryState": null,
+            "flags": {
+              "opened": true,
+              "replied": false,
+              "forwarded": false,
+              "sent": false,
+              "calendar": false,
+              "dmarc": false,
+              "delayed": false,
+              "scheduled": false,
+              "canceled": false,
+              "smtpForwarded": false,
+              "securityEditable": false,
+              "individualSend": false,
+              "tnef": false,
+              "reportHacking": false,
+              "dkimPass": true,
+              "approve": false,
+              "auditSecurity": false,
+              "deleted": false,
+              "read": true,
+              "draft": false,
+              "favorite": false
+            }
+          },
+          "threadMail": null,
+          "fileCount": 0,
+          "approval": null,
+          "senderIp": null,
+          "countryCode": "KR",
+          "id": "4460000000000000003",
+          "uid": "91230",
+          "users": {
+            "from": {
+              "type": "emailUser",
+              "emailUser": {
+                "name": "김철수",
+                "emailAddress": "chulsoo@kaist.ac.kr"
+              }
+            },
+            "envFrom": {
+              "type": "emailUser",
+              "emailUser": {
+                "name": "김철수",
+                "emailAddress": "chulsoo@kaist.ac.kr"
+              }
+            },
+            "froms": [
+              {
+                "type": "emailUser",
+                "emailUser": {
+                  "name": "김철수",
+                  "emailAddress": "chulsoo@kaist.ac.kr"
+                }
+              }
+            ],
+            "to": [
+              {
+                "type": "emailUser",
+                "emailUser": {
+                  "name": "홍길동",
+                  "emailAddress": "gildong@kaist.ac.kr"
+                }
+              }
+            ],
+            "cc": [
+              {
+                "type": "emailUser",
+                "emailUser": {
+                  "name": "이영희",
+                  "emailAddress": "younghee@example.com"
+                }
+              }
+            ],
+            "bcc": [],
+            "replyTo": [
+              {
+                "type": "emailUser",
+                "emailUser": {
+                  "name": "김철수",
+                  "emailAddress": "chulsoo@kaist.ac.kr"
+                }
+              }
+            ],
+            "more": false
+          },
+          "folderId": "3100000000000000001",
+          "annotations": {
+            "favorited": false
+          }
+        }
+      }
+    },
+    "contents": [
+      {
+        "subject": "[학사] 2026학년도 봄학기 수강신청 안내",
+        "body": null,
+        "mimeType": null,
+        "files": null,
+        "userList": null,
+        "size": null,
+        "deleted": null,
+        "mailDirection": null,
+        "matchedFiles": [
+          "2026학년도 봄학기 수강신청 안내.pdf"
+        ],
+        "sentAt": "2026-11-12T09:40:55+09:00",
+        "id": "4460000000000000001",
+        "uid": "91234"
+      },
+      {
+        "subject": "Re: 실험 데이터 공유 건",
+        "body": null,
+        "mimeType": null,
+        "files": null,
+        "userList": null,
+        "size": null,
+        "deleted": null,
+        "mailDirection": null,
+        "matchedFiles": [],
+        "sentAt": "2026-11-10T22:14:58+09:00",
+        "id": "4460000000000000003",
+        "uid": "91230"
+      }
+    ]
+  }
+}
