@@ -15,9 +15,11 @@ What kaist-mail can do now, what is proven live, and what comes next.
 
 | Capability | Built | Proven live |
 |---|---|---|
-| SAML login via KAIST SSO (Easy Login, password + code) | yes | no |
-| Session storage, expiry detection | yes | no |
-| `folders` | yes | no |
+| SAML login via KAIST SSO (Easy Login) | yes | yes (2026-11-12) |
+| SAML login via password + code | yes | no |
+| Session storage (`SESSION` only, no expiry), expiry detection | yes | storage yes |
+| `folders` | yes | yes |
+| Session renewal without the phone | no | no |
 | list, search | no | no |
 | read, attachments | no | no |
 
