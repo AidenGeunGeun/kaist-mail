@@ -1,0 +1,37 @@
+[package]
+name = "kaist-mail"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "An agent-friendly CLI for KAIST Dooray mail"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "kaist-mail"
+path = "src/main.rs"
+
+[dependencies]
+cbc = { version = "=0.1.2", features = ["alloc", "zeroize"] }
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+kisaseed = { version = "=0.1.3", features = ["zeroize"] }
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+url = "=2.5.8"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rpassword = "=7.5.4"
+scraper = "=0.23.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+zeroize = "=1.9.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true
