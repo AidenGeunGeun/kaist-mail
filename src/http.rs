@@ -9,9 +9,10 @@ use std::{
 use crate::url::{Url, is_loopback};
 use ureq::{
     Agent, BodyReader, Proxy,
-    config::Config,
+    config::ConfigBuilder,
     http::{self},
     tls::{RootCerts, TlsConfig},
+    typestate::AgentScope,
 };
 
 use crate::error::AppError;
@@ -24,21 +25,32 @@ pub const USER_AGENT: &str = concat!("kaist-mail/", env!("CARGO_PKG_VERSION"));
 /// leaves redirects to the caller. Each request picks its own proxy (see
 /// [`proxy_for`]); trust roots come from the platform store.
 pub fn agent(timeout: Duration, connect_timeout: Option<Duration>) -> Agent {
+    Agent::new_with_config(config(timeout).timeout_connect(connect_timeout).build())
+}
+
+/// An agent for long transfers: `deadline` bounds the whole transfer, and
+/// connecting or waiting for the response headers fails after `stall`.
+/// Stalls inside the body are the reader's to detect.
+pub fn streaming_agent(deadline: Duration, stall: Duration) -> Agent {
+    let config = config(deadline)
+        .timeout_connect(Some(stall))
+        .timeout_recv_response(Some(stall));
+    Agent::new_with_config(config.build())
+}
+
+fn config(timeout: Duration) -> ConfigBuilder<AgentScope> {
     let tls = TlsConfig::builder()
         .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .root_certs(RootCerts::PlatformVerifier)
         .build();
-    let config: Config = Agent::config_builder()
+    Agent::config_builder()
         .timeout_global(Some(timeout))
-        .timeout_connect(connect_timeout)
         .user_agent(USER_AGENT)
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
         .proxy(None)
         .tls_config(tls)
-        .build();
-    Agent::new_with_config(config)
 }
 
 /// A response whose body is read on demand through [`io::Read`].

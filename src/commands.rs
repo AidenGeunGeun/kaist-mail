@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::{self, AuthStatus, LoginOptions},
     cli::{AuthCommand, Cli, Command},
-    client::{Client, SYSTEM_FOLDERS, USER_FOLDERS, validate_base_url},
+    client::{Client, Limits, SYSTEM_FOLDERS, USER_FOLDERS, validate_base_url},
+    download,
     error::AppError,
+    mail,
     output::{self, CommandResult, ListMeta},
 };
 
@@ -31,6 +33,29 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
         Command::Folders => folders(&Client::new(base, cli.timeout)?),
         Command::List(args) => crate::query::list(&Client::new(base, cli.timeout)?, args),
         Command::Search(args) => crate::query::search(&Client::new(base, cli.timeout)?, args),
+        Command::Read(args) => {
+            let options = mail::ReadOptions {
+                offset: args.offset,
+                max_chars: args.max_chars,
+                recipients: args.recipients,
+            };
+            mail::read(&Client::new(base, cli.timeout)?, &args.id, &options)
+        }
+        Command::Download(args) => {
+            let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
+            // The detail fetch is the first request, so this keeps it within --max-seconds.
+            let client = Client::new(base, cli.timeout.min(args.transfer.max_seconds))?;
+            download::attachments(&client, &args.id, &args.parts, &args.out, limits)
+        }
+        Command::Export(args) => {
+            let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
+            download::eml(
+                &Client::new(base, cli.timeout)?,
+                &args.id,
+                &args.out,
+                limits,
+            )
+        }
     }
 }
 

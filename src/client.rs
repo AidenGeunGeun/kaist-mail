@@ -14,16 +14,19 @@ use crate::{
     auth,
     error::AppError,
     http::{self, Failure, Follow, Method, Payload, Response},
-    output,
     url::{Url, is_http_loopback},
 };
+
+mod transfer;
+
+pub use transfer::{Limits, Size};
 
 pub const PRODUCTION: &str = "https://kaist.gov-dooray.com/";
 /// The system folders; small, and also the login's check that a new session
 /// is signed in.
 pub const SYSTEM_FOLDERS: &str = "/v2/wapi/mail-folders?type=system&size=10000&page=0";
 pub const USER_FOLDERS: &str = "/v2/wapi/mail-folders?type=user&size=10000&page=0";
-/// shortcut: whole bodies are buffered; stream once attachment downloads land.
+/// wapi answers are buffered whole; files stream through [`Client::download`].
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 
 pub struct Client {
@@ -45,8 +48,6 @@ struct Header {
     is_successful: bool,
     #[serde(default)]
     result_code: i64,
-    #[serde(default)]
-    result_message: String,
 }
 
 /// Accept only the production origin or a loopback fixture.
@@ -120,6 +121,7 @@ impl Client {
         let mut policy = Policy {
             base: &self.base,
             cookie: &self.cookie,
+            shown: path,
         };
         let request = Follow {
             method,
@@ -130,37 +132,49 @@ impl Client {
         };
         let response = http::follow(&self.agent, request, &mut policy).map_err(failure)?;
         let bytes = read_body(response)?;
-        let shape = |detail: String| AppError::shape(format!("Dooray {path} answered {detail}"));
-        let decode = |error| shape(crate::error::json_problem(&error));
         // The header decides the outcome before the result's type is checked.
-        let envelope: Envelope<Header, IgnoredAny> =
-            serde_json::from_slice(&bytes).map_err(decode)?;
-        let Header {
-            is_successful,
-            result_code,
-            result_message,
-        } = envelope.header;
-        if !is_successful {
-            // Logic keys on resultCode. resultMessage is Dooray's localized
-            // reason for the user, kept only in details, bounded and stripped
-            // of control characters because it is untrusted server text.
-            let reason: String = output::sanitize_terminal(&result_message)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(200)
-                .collect();
-            return Err(AppError::upstream(format!(
-                "Dooray reported error {result_code} for {path}"
-            ))
-            .with_details(json!({"result_code": result_code, "result_message": reason})));
-        }
-        let envelope: Envelope<IgnoredAny, T> = serde_json::from_slice(&bytes).map_err(decode)?;
+        check_header(path, &bytes)?;
+        let envelope: Envelope<IgnoredAny, T> =
+            serde_json::from_slice(&bytes).map_err(|error| decode_error(path, &error))?;
         envelope
             .result
-            .ok_or_else(|| shape("success without a result".into()))
+            .ok_or_else(|| shape_error(path, "success without a result"))
     }
+}
+
+fn shape_error(path: &str, detail: &str) -> AppError {
+    AppError::shape(format!("Dooray {path} answered {detail}"))
+}
+
+fn decode_error(path: &str, error: &serde_json::Error) -> AppError {
+    shape_error(path, &crate::error::json_problem(error))
+}
+
+/// The error a wapi envelope's `header` reports, if any. Only the code is
+/// reported: `resultMessage` is localized server text that can quote mail
+/// or request data.
+fn check_header(path: &str, bytes: &[u8]) -> Result<(), AppError> {
+    let envelope: Envelope<Header, IgnoredAny> =
+        serde_json::from_slice(bytes).map_err(|error| decode_error(path, &error))?;
+    let Header {
+        is_successful,
+        result_code,
+    } = envelope.header;
+    if is_successful {
+        return Ok(());
+    }
+    let meaning = match result_code {
+        -100207 => "the message was deleted or recalled, or is not in this mailbox",
+        -200200 => "Dooray rejected the request as invalid",
+        -200100 => "the request named no messages",
+        -100300 => "Dooray had a server error",
+        -13207002 => "the search keyword is too long",
+        _ => "Dooray refused the request",
+    };
+    Err(
+        AppError::upstream(format!("{meaning} (error {result_code} for {path})"))
+            .with_details(json!({"result_code": result_code})),
+    )
 }
 
 fn read_body(response: Response) -> Result<Vec<u8>, AppError> {
@@ -192,6 +206,8 @@ fn failure(failure: Failure) -> AppError {
 struct Policy<'a> {
     base: &'a Url,
     cookie: &'a str,
+    /// What errors call the request; never a server-provided path.
+    shown: &'a str,
 }
 
 impl http::Policy for Policy<'_> {
@@ -223,7 +239,7 @@ impl http::Policy for Policy<'_> {
     fn inspect(&mut self, response: &Response) -> Result<(), AppError> {
         match response.status() {
             200..400 => Ok(()),
-            status => Err(AppError::http(status, response.url().path())),
+            status => Err(AppError::http(status, self.shown)),
         }
     }
 }

@@ -1,4 +1,8 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
+
+use crate::mail::MailId;
 
 const TOP_HELP: &str = "Workflow:
   kaist-mail auth login                 # interactive; passwords are never flags
@@ -6,6 +10,9 @@ const TOP_HELP: &str = "Workflow:
   kaist-mail --json list --unread       # newest unread inbox rows, 20 at a time
   kaist-mail --json search --from 학사팀 --since 2026-09-01   # find mail anywhere
   ... --cursor <meta.next_cursor>       # continue a list or search after its last row
+  kaist-mail --json read ID             # one message as text (marks it read)
+  kaist-mail --json download ID --out DIR   # its attachments as new private files
+  kaist-mail --json export ID --out DIR     # the raw .eml; leaves it unread
 
 JSON contract (put global --json before the command):
   stdout on success: {schema_version, ok:true, command, data, warnings, meta?}
@@ -22,15 +29,17 @@ Exit codes:
   11 AUTH_PROTOCOL_CHANGED   12 CODE_REQUIRED (resume: `auth login --code`)
   13 PERMISSION_DENIED       20 NETWORK_ERROR (retryable)
   21 HTTP_ERROR              30 UPSTREAM_SHAPE_CHANGED
-  31 UPSTREAM_ERROR (details: result_code, and result_message: Dooray's localized
-     reason, untrusted text cut to 200 characters)
+  31 UPSTREAM_ERROR (details: result_code, Dooray's integer code; the message
+     names known codes. Dooray's own text is never shown: it may quote mail)
   40 CONFIG_ERROR            41 LIMIT_EXCEEDED
   44 NOT_FOUND               50 INTERNAL_ERROR
 
 Safety:
-  Read-only: kaist-mail never sends, moves, deletes or marks mail. `list` and
-  `search` show stored summaries and leave messages unread. Session cookies
-  go only to https://kaist.gov-dooray.com. `auth status` is secret-free. Never ask
+  kaist-mail never sends, moves or deletes mail. `read` and `download` mark the
+  message read, as opening it in Dooray does (JSON marked_read says whether this
+  call changed it); `list`, `search`, `export` and all other commands leave read
+  state alone. Downloads never overwrite a file. Session cookies go only to
+  https://kaist.gov-dooray.com. `auth status` is secret-free. Never ask
   for or accept a password in chat: new passwords use hidden terminal prompts. The
   agent sign-in flow needs the six-digit code KAIST sends by email or SMS; ask the
   user for that code only.";
@@ -60,8 +69,8 @@ pub struct Cli {
     )]
     pub base_url: String,
 
-    /// Time limit for each request, in seconds (1-120), covering its redirects
-    /// and the body read.
+    /// Time limit for each API request, in seconds (1-120), covering its
+    /// redirects and the body read. File transfers use --max-seconds instead.
     #[arg(long, global = true, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=120))]
     pub timeout: u64,
 
@@ -92,6 +101,87 @@ pub enum Command {
         after_help = SEARCH_HELP
     )]
     Search(SearchArgs),
+    /// Read one message as text (marks it read, as opening it in Dooray does).
+    #[command(
+        long_about = "Fetch one message and print its headers, attachments and body as plain text. Dooray's HTML body is rendered with quotes kept as `> ` lines, links as `text <url>`, images as their alt text, and each table cell on its own line. Fetching the message marks it read on Dooray, exactly as opening it in the web app does; marked_read says whether this call changed it.",
+        after_help = "Body window: at most --max-chars characters (Unicode scalar values) from --offset. When more text follows, body.next_offset is set; pass it as --offset to continue. Each call fetches the message again.\n\nJSON data: {id, subject, from?, to, cc?, bcc?, reply_to?, more_recipients?, date?, read: true, marked_read, attachments?: [{part, name, size, mime, deleted?}], body: {text, offset, total_chars, next_offset?}}. Recipients are \"Name <address>\" strings, at most 3 per field unless --recipients; more_recipients counts the rest. part is the reference `download --part` takes; size is in bytes.\n\nExamples:\n  kaist-mail read 4237456781234567890\n  kaist-mail --json read 4237456781234567890 --offset 4000 --max-chars 20000"
+    )]
+    Read(ReadArgs),
+    /// Save a message's attachments as new private files (marks the message read).
+    #[command(
+        long_about = "Save the attachments of one message, all of them or the --part numbers `read` lists, as new files with mode 0600. Each file is written to a hidden temporary beside its destination and linked into place only when complete; an existing file is never overwritten. When --out is an existing directory, each file keeps its Dooray name made safe for the filesystem (path separators, control characters and leading dots replaced or dropped, at most 255 bytes); Korean names stay as they are. Otherwise --out is the new file's path and exactly one attachment must be selected. Finding the attachments fetches the message, which marks it read, as opening it in Dooray does.",
+        after_help = TRANSFER_HELP_DOWNLOAD
+    )]
+    Download(DownloadArgs),
+    /// Save a message as a raw .eml file without marking it read.
+    #[command(
+        long_about = "Save one message exactly as Dooray stores it (RFC 5322: every part, with the original charsets) to a new file with mode 0600, never overwriting. This uses Dooray's raw-message endpoint, which leaves the read state unchanged. When --out is an existing directory, the file is named <ID>.eml inside it.",
+        after_help = TRANSFER_HELP_EXPORT
+    )]
+    Export(ExportArgs),
+}
+
+const TRANSFER_HELP_DOWNLOAD: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long. Each file must be exactly the size Dooray lists.\n\nJSON data: {id, marked_read, files: [{part, path, bytes}]}; path is absolute. If a later file fails, error.details.saved_parts lists the parts already saved. Errors name parts and --out, never Dooray's file names.\n\nExamples:\n  kaist-mail download 4237456781234567890 --out ~/Downloads\n  kaist-mail --json download 4237456781234567890 --part 3 --out notice.pdf";
+
+const TRANSFER_HELP_EXPORT: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long.\n\nJSON data: {id, path, bytes}; path is absolute.\n\nExamples:\n  kaist-mail export 4237456781234567890 --out ~/mail\n  kaist-mail --json export 4237456781234567890 --out notice.eml";
+
+#[derive(Args)]
+pub struct ReadArgs {
+    /// The message id `list` or `search` prints.
+    pub id: MailId,
+
+    /// First body character to print.
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+
+    /// Most body characters to print.
+    #[arg(long, default_value_t = 4000, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    pub max_chars: usize,
+
+    /// List every recipient instead of the first 3 per field.
+    #[arg(long)]
+    pub recipients: bool,
+}
+
+#[derive(Args)]
+pub struct DownloadArgs {
+    /// The message id `list` or `search` prints.
+    pub id: MailId,
+
+    /// Attachment part to save, as `read` lists it; repeat for several (default: all).
+    #[arg(long = "part", value_name = "PART")]
+    pub parts: Vec<u32>,
+
+    /// An existing directory, or the new file's path when one attachment is saved.
+    #[arg(long, value_name = "PATH")]
+    pub out: PathBuf,
+
+    #[command(flatten)]
+    pub transfer: TransferArgs,
+}
+
+#[derive(Args)]
+pub struct ExportArgs {
+    /// The message id `list` or `search` prints.
+    pub id: MailId,
+
+    /// An existing directory (the file is named <ID>.eml), or the new file's path.
+    #[arg(long, value_name = "PATH")]
+    pub out: PathBuf,
+
+    #[command(flatten)]
+    pub transfer: TransferArgs,
+}
+
+#[derive(Args)]
+pub struct TransferArgs {
+    /// Time limit for the whole command, in seconds (1-86400).
+    #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    pub max_seconds: u64,
+
+    /// Fail when no data arrives for this many seconds (1-600).
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600))]
+    pub stall_seconds: u64,
 }
 
 macro_rules! rows_help {

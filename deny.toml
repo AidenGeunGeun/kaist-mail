@@ -6,11 +6,6 @@ targets = [
     "x86_64-unknown-linux-gnu",
 ]
 
-[advisories]
-ignore = [
-    { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1 is an unmaintained transitive dependency through scraper/selectors; no patched release currently exists" },
-]
-
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
