@@ -61,19 +61,19 @@ struct EmailUser {
 pub struct Summary {
     pub id: String,
     /// Received time, RFC 3339 with the offset Dooray reports.
-    pub at: String,
-    pub from: String,
-    pub subject: String,
+    at: String,
+    from: String,
+    subject: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub unread: bool,
+    unread: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub favorite: bool,
+    favorite: bool,
     #[serde(skip_serializing_if = "is_zero")]
-    pub files: u32,
+    files: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub folder: Option<String>,
+    folder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub preview: Option<String>,
+    preview: Option<String>,
     /// `at` in Unix seconds, the order continuation keys on.
     #[serde(skip)]
     pub time: i64,
