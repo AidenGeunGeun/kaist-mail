@@ -411,14 +411,14 @@ fn only_a_saml_post_to_the_acs_that_authenticates_dooray_counts_as_login() {
 }
 
 #[test]
-fn unknown_sso_codes_are_named_only_when_they_look_like_codes() {
-    for (code, shown) in [("XYZ123", true), ("COOKIE-CANARY; x=1", false)] {
+fn unrecognized_sso_codes_are_never_echoed() {
+    // A misbehaving server could reflect the password or the code here.
+    for code in ["XYZ123", "s3cret", "COOKIE-CANARY; x=1"] {
         let fixture = Fixture::new(Variant::Normal);
         fixture.remember_password();
         *fixture.password_result.lock().unwrap() = format!(r#"{{"errorCode":"{code}"}}"#);
         let error = fixture.login(&password(), false).err().unwrap();
         assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED");
-        assert_eq!(error.message.contains(code), shown, "{}", error.message);
-        assert!(!error.message.contains("CANARY"), "{}", error.message);
+        assert!(!error.message.contains(code), "{}", error.message);
     }
 }

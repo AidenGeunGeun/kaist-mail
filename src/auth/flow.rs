@@ -132,23 +132,9 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
                 "KAIST rejected the {what} transaction"
             )))
         }
-        _ => Err(AppError::auth_protocol(format!(
-            "KAIST SSO returned unknown result code {}",
-            shown(code)
-        ))),
-    }
-}
-
-/// A result code for an error message, quoted only when it looks like one:
-/// the field is server text and could carry anything.
-fn shown(code: &str) -> String {
-    let plausible = (1..=16).contains(&code.len())
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-    match plausible {
-        true => format!("{code:?}"),
-        false => format!("({} characters, not shown)", code.chars().count()),
+        _ => Err(AppError::auth_protocol(
+            "KAIST SSO returned unknown result code; its value is not shown",
+        )),
     }
 }
 
@@ -174,10 +160,9 @@ fn easy_approved(code: &str) -> Result<bool, AppError> {
             "Start a new Easy Login request.",
         ),
         "E004" => denied("Easy Login expired", "Start a new Easy Login request."),
-        other => Err(AppError::auth_protocol(format!(
-            "KAIST SSO returned unknown result code {}",
-            shown(other)
-        ))),
+        _ => Err(AppError::auth_protocol(
+            "KAIST SSO returned unknown result code; its value is not shown",
+        )),
     }
 }
 
@@ -453,11 +438,10 @@ fn second_factor(
                 "KAIST could not deliver the verification code",
             ));
         }
-        other => {
-            return Err(AppError::auth_protocol(format!(
-                "KAIST returned unknown verification-send code {}",
-                shown(other)
-            )));
+        _ => {
+            return Err(AppError::auth_protocol(
+                "KAIST returned unknown verification-send code; its value is not shown",
+            ));
         }
     }
     if defer_code {
@@ -510,10 +494,9 @@ fn easy_login(
         ));
     }
     if !matches!(code, "" | "SS0001") {
-        return Err(AppError::auth_protocol(format!(
-            "KAIST returned unknown Easy Login init code {}",
-            shown(code)
-        )));
+        return Err(AppError::auth_protocol(
+            "KAIST returned unknown Easy Login init code; its value is not shown",
+        ));
     }
     let (_, challenge) =
         transport.post("/auth/twofactor/mfa/login2Factor", &[("linkUrl", LINK_URL)])?;
@@ -673,10 +656,9 @@ fn register_device(transport: &mut SsoTransport) -> Result<(), AppError> {
     let response = transport.ajax(REGISTER, &[])?;
     let code = result_code(&response)?;
     if !matches!(code, "" | "SS0001") {
-        return Err(AppError::auth_protocol(format!(
-            "KAIST returned unknown device-registration code {}",
-            shown(code)
-        )));
+        return Err(AppError::auth_protocol(
+            "KAIST returned unknown device-registration code; its value is not shown",
+        ));
     }
     let device = response
         .get("device_cd")

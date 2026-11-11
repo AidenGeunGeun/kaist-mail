@@ -195,13 +195,16 @@ impl Jar {
     /// The site-wide `SESSION` cookie Dooray itself issued: the only one
     /// persisted. Dooray authenticates by it alone (`JSESSIONID` and the
     /// monitoring cookies get 401 on their own).
+    /// An expired one is left out, so it is neither verified nor saved.
     pub fn dooray_cookies(&self, dooray: &Url) -> Vec<StoredCookie> {
         let origin = dooray.origin().ascii_serialization();
+        let now = epoch_now();
         let mut result = self
             .cookies
             .iter()
             .filter(|cookie| {
                 cookie.name == "SESSION"
+                    && live(cookie.expires_at, now)
                     && cookie.source_origin == origin
                     && cookie.path == "/"
                     && (!cookie.secure || dooray.scheme() == "https")
@@ -400,6 +403,13 @@ mod tests {
             checked.cookies.len(),
             1,
             "restoration drops the expired cookie"
+        );
+
+        let expired = serde_json::json!({"cookies": [cookie("SESSION", 1)], "devices": []});
+        let expired: Jar = serde_json::from_value(expired).unwrap();
+        assert!(
+            expired.dooray_cookies(&url).is_empty(),
+            "an expired session is never verified or saved"
         );
     }
 
