@@ -18,6 +18,12 @@ covers password login, the two-step `--code` flow for agents, and keychain stora
 `make check` runs fmt, tests, clippy and cargo-deny. See [AGENTS.md](AGENTS.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+## Acknowledgements
+
+kaist-mail is inspired by [alazarteka/klms](https://github.com/alazarteka/klms), the KAIST KLMS CLI. Its
+architecture, KAIST SSO handling, session storage and JSON contract follow klms, and portions of its code are
+adapted from it.
+
 ## License
 
-MIT. Portions are derived from [klms](https://github.com/alazarteka/klms); see LICENSE.
+MIT. See LICENSE, which also carries the klms notice for the adapted portions.

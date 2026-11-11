@@ -7,7 +7,7 @@ What kaist-mail can do now, what is proven live, and what comes next.
 - Rust, one crate, built to the KLMS CLI's architecture and quality.
 - Read-only for now; command boundaries should allow send/move/delete later.
 - Reading a message marks it read, as the web app does.
-- Token-efficient agent output is a first-class requirement (inbox: about 8,300 messages, 2,800 unread).
+- Token-efficient agent output is a first-class requirement: inboxes hold thousands of messages.
 - English and Korean accounts both work.
 - Login needs the user's phone; the user runs `kaist-mail auth login`, agents never trigger it.
 
