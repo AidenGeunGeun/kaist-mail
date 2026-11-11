@@ -104,11 +104,14 @@ macro_rules! rows_help {
   folder   (search without --folder) the system folder name or your folder's name
   preview  (with --preview) Dooray's plain-text opening, up to about 200 characters
 meta: {returned, total, total_capped?, next_cursor?}
-  total        the query's matches as Dooray counts them (search: first page only)
+  total        the query's matches as Dooray counts them (search: first page only;
+               with --since/--before it may count messages at the bounds' edges)
   total_capped Dooray stopped counting at 2000; there are at least that many
   next_cursor  more rows follow: run the same command again with --cursor VALUE;
                absent when nothing follows. The cursor holds the last row's time
-               and id, so it stays valid while mail arrives, is read or moves."
+               and id, so it stays valid while mail arrives, is read or moves.
+               Paging stops with LIMIT_EXCEEDED inside a second holding more
+               than 100 shown messages; narrow the query then."
     };
 }
 

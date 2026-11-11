@@ -109,7 +109,8 @@ fn contains(text: &str, term: &Value) -> bool {
 }
 
 /// Search as these tests assume Dooray runs it: every term matches, `since`
-/// is inclusive and `before` exclusive on the received time, newest first,
+/// and `before` are inclusive on the received time (the reading that needs
+/// local filtering for an exclusive `--before`), newest first,
 /// counted and paged only through the first 2000 hits.
 fn search(mailbox: &[Message], body: &Value) -> Response {
     let bound = |key: &str| {
@@ -153,7 +154,7 @@ fn search(mailbox: &[Message], body: &Value) -> Response {
                     .get("seenFlag")
                     .is_none_or(|seen| *seen == json!(!message.unread))
                 && since.as_ref().is_none_or(|since| message.at >= *since)
-                && before.as_ref().is_none_or(|before| message.at < *before)
+                && before.as_ref().is_none_or(|before| message.at <= *before)
         })
         .take(2000)
         .collect();
@@ -405,7 +406,7 @@ fn search_continues_past_the_2000_hit_cap_in_english_and_korean() {
     assert_eq!(ids, seminars);
 
     // Decomposed Hangul (as macOS file names carry it) finds the composed subjects.
-    let (since, before) = (stamp(400), stamp(100));
+    let (since, before) = (stamp(401), stamp(101));
     let korean: Vec<String> = all
         .iter()
         .filter(|message| {
@@ -440,7 +441,8 @@ fn search_continues_past_the_2000_hit_cap_in_english_and_korean() {
         ],
     );
     assert_eq!(ids, korean);
-    assert_eq!(first["total"], korean.len());
+    // Dooray's count includes the message at exactly --before; the rows do not.
+    assert_eq!(first["total"], korean.len() + 1);
     assert_eq!(first.get("total_capped"), None);
 }
 
@@ -459,4 +461,114 @@ fn search_rows_name_their_folder_and_hits_come_from_the_mail_map() {
     let body: Value = serde_json::from_str(&server.recorded()[0].body).unwrap();
     assert_eq!(body["all"], json!(["수강신청"]));
     assert_eq!(body["exceptFolders"], json!(["spam", "trash"]));
+}
+
+#[test]
+fn list_continuation_finds_unshown_messages_that_moved_ahead_within_a_tied_second() {
+    let mailbox: Mailbox = Arc::new(Mutex::new(messages(60)));
+    let inbox: Vec<String> = mailbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|message| message.folder == "inbox")
+        .map(|message| message.id.clone())
+        .collect();
+    let server = dooray(&mailbox);
+    let home = Home::new(Some(&live()));
+
+    let (mut shown, meta) = page(&home, &server, &["--json", "list"], None);
+    // Dooray may order a tied second differently on the next call: four
+    // unshown messages of it move ahead of the five shown ones.
+    mailbox.lock().unwrap()[15..24].rotate_left(5);
+    let (more, meta) = page(
+        &home,
+        &server,
+        &["--json", "list"],
+        meta["next_cursor"].as_str(),
+    );
+    shown.extend(more);
+    let (more, meta) = page(
+        &home,
+        &server,
+        &["--json", "list"],
+        meta["next_cursor"].as_str(),
+    );
+    shown.extend(more);
+    assert_eq!(meta.get("next_cursor"), None);
+    shown.sort();
+    let mut expected = inbox;
+    expected.sort();
+    assert_eq!(shown, expected);
+}
+
+#[test]
+fn search_refuses_to_end_silently_inside_a_second_with_too_many_hits() {
+    let mut mailbox = messages(2001);
+    for message in &mut mailbox[..2000] {
+        (message.at, message.folder) = (stamp(0), "inbox");
+    }
+    mailbox[2000].folder = "inbox";
+    let mailbox: Mailbox = Arc::new(Mutex::new(mailbox));
+    let server = dooray(&mailbox);
+    let home = Home::new(Some(&live()));
+
+    let args = ["--json", "search", "kaist", "--limit", "100"];
+    let (mut shown, meta) = page(&home, &server, &args, None);
+    let mut cursor = meta["next_cursor"].as_str().unwrap().to_owned();
+    let error = loop {
+        let mut args = args.to_vec();
+        args.extend(["--cursor", &cursor]);
+        let output = home.run(Some(&server), &args);
+        if !output.status.success() {
+            break envelope(&output.stderr);
+        }
+        let json = envelope(&output.stdout);
+        shown.extend(
+            json["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned()),
+        );
+        cursor = json["meta"]["next_cursor"]
+            .as_str()
+            .unwrap_or_else(|| panic!("ended after {} of 2001 hits", shown.len()))
+            .to_owned();
+    };
+    assert_eq!(error["error"]["code"], "LIMIT_EXCEEDED", "{error}");
+}
+
+#[test]
+fn cursors_out_of_range_are_usage_errors_before_any_request() {
+    let server = Server::new(|request: &Request| panic!("unexpected request {}", request.target));
+    let home = Home::new(Some(&live()));
+    let many = vec!["4460000000000000000"; 101].join(".");
+    for (command, cursor) in [
+        (
+            &["list"][..],
+            "18446744073709551615.1794452400.4460000000000000000".to_owned(),
+        ),
+        (
+            &["list"],
+            "20000001.1794452400.4460000000000000000".to_owned(),
+        ),
+        (
+            &["list"],
+            "20.1794452400.446000000000000000000000".to_owned(),
+        ),
+        (
+            &["search", "x"],
+            "20.9223372036854775807.4460000000000000000".to_owned(),
+        ),
+        (
+            &["search", "x"],
+            "20.-9223372036854775808.4460000000000000000".to_owned(),
+        ),
+        (&["search", "x"], format!("20.1794452400.{many}")),
+    ] {
+        let args = [&["--json"], command, &["--cursor", &cursor]].concat();
+        let output = home.run(Some(&server), &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+    }
+    assert!(server.requests().is_empty());
 }

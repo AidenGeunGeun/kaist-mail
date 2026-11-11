@@ -38,11 +38,13 @@ pub fn parse_rfc3339(value: &str) -> Option<i64> {
     Some(day(date)? * 86_400 + seconds - offset)
 }
 
-/// A `--since`/`--before` value: `YYYY-MM-DD` (midnight, Korea time) or RFC 3339.
+/// A `--since`/`--before` value: `YYYY-MM-DD` (midnight, Korea time) or RFC
+/// 3339 in whole seconds, the precision Dooray reports received times in.
 pub fn parse_bound(value: &str) -> Result<i64, String> {
     let midnight = || Some(day(value)? * 86_400 - KOREA);
-    midnight().or_else(|| parse_rfc3339(value)).ok_or_else(|| {
-        "expected YYYY-MM-DD (Korea time) or RFC 3339 such as 2026-11-12T09:00:00+09:00".into()
+    let instant = || parse_rfc3339(value).filter(|_| !value.contains('.'));
+    midnight().or_else(instant).ok_or_else(|| {
+        "expected YYYY-MM-DD (Korea time) or RFC 3339 in whole seconds such as 2026-11-12T09:00:00+09:00".into()
     })
 }
 
@@ -133,6 +135,7 @@ mod tests {
             "2026-11-12T09:41+09:00",
             "2026-11-12 09:41:07+09:00",
             "26-11-12",
+            "2026-11-12T12:00:00.5+09:00",
         ] {
             assert!(parse_bound(invalid).is_err(), "{invalid}");
         }

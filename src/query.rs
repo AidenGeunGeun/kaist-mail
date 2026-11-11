@@ -23,6 +23,14 @@ const SEARCH_CAP: u64 = 2000;
 const STEP: u64 = 100;
 /// Dooray calls one page may take before the cursor is declared too stale.
 const MAX_CALLS: u64 = 10;
+/// Messages shown at one received second that a cursor can carry. Dooray
+/// orders a second's messages arbitrarily, so continuing inside one means
+/// rereading all of them; past this many, the query must be narrowed.
+const MAX_SEEN: usize = 100;
+/// Bounds that keep a cursor's arithmetic and requests small: offsets past
+/// any mailbox, and seconds outside years 1970-9999.
+const MAX_OFFSET: u64 = 10_000_000;
+const MAX_TIME: i64 = 253_402_300_799;
 
 /// Where a query looks: a system folder by its stable name, or any folder by id.
 #[derive(Clone)]
@@ -79,8 +87,14 @@ impl Cursor {
     }
 
     /// The cursor after `rows`, the last of which stood at `offset - 1`.
-    fn after(rows: &[Summary], offset: u64, previous: Option<&Cursor>) -> Option<Self> {
-        let time = rows.last()?.time;
+    fn after(
+        rows: &[Summary],
+        offset: u64,
+        previous: Option<&Cursor>,
+    ) -> Result<Option<Self>, AppError> {
+        let Some(time) = rows.last().map(|row| row.time) else {
+            return Ok(None);
+        };
         let carried = previous.filter(|cursor| cursor.time == time);
         let seen = carried
             .into_iter()
@@ -90,8 +104,15 @@ impl Cursor {
                     .filter(|row| row.time == time)
                     .map(|row| row.id.clone()),
             )
-            .collect();
-        Some(Self { offset, time, seen })
+            .collect::<Vec<_>>();
+        if seen.len() > MAX_SEEN {
+            return Err(AppError::limit(format!(
+                "more than {MAX_SEEN} messages share the received time {}, past which kaist-mail cannot page reliably",
+                time::format_korea(time)
+            ))
+            .with_hint("Narrow the query, for example with search --from, --subject or --before."));
+        }
+        Ok(Some(Self { offset, time, seen }))
     }
 }
 
@@ -107,13 +128,19 @@ impl FromStr for Cursor {
     fn from_str(value: &str) -> Result<Self, String> {
         let invalid = || "not a cursor from this command's meta.next_cursor".to_owned();
         let mut parts = value.split('.');
-        let offset = parts.next().and_then(|part| part.parse().ok());
-        let time = parts.next().and_then(|part| part.parse().ok());
+        let offset = parts
+            .next()
+            .and_then(|part| part.parse().ok())
+            .filter(|offset| *offset <= MAX_OFFSET);
+        let time = parts
+            .next()
+            .and_then(|part| part.parse().ok())
+            .filter(|time| (0..=MAX_TIME).contains(time));
         let seen: Vec<String> = parts.map(str::to_owned).collect();
-        let ids = !seen.is_empty()
-            && seen
-                .iter()
-                .all(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
+        let ids = (1..=MAX_SEEN).contains(&seen.len())
+            && seen.iter().all(|id| {
+                (1..=20).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_digit())
+            });
         match (offset, time) {
             (Some(offset), Some(time)) if ids => Ok(Self { offset, time, seen }),
             _ => Err(invalid()),
@@ -206,9 +233,9 @@ pub fn list(client: &Client, args: &PageArgs) -> Result<CommandResult, AppError>
 
 /// One page of a newest-first list that Dooray pages by number. With a
 /// cursor, the call that reads the cursor's old position also reads the
-/// message before it, so an unchanged list costs one call; when that message
-/// left (the cursor stands too far) or new mail arrived (too near), the
-/// page is found by reading on in steps.
+/// messages shown at its second and one before them, so an unchanged list
+/// costs one call; when messages left (the cursor stands too far) or new
+/// mail arrived (too near), the page is found by reading on in steps.
 fn list_page(
     mut fetch: impl FnMut(u64, u64) -> Result<Fetched, AppError>,
     limit: u64,
@@ -232,10 +259,16 @@ fn list_page(
             total,
         ))
     };
-    let mut start = cursor.map_or(0, |cursor| cursor.offset.saturating_sub(1));
-    let (mut rows, mut total) = range(start, limit + u64::from(cursor.is_some()))?;
+    // Start before every message shown at the cursor's second: only a row
+    // received later proves that no unshown message of that second precedes it.
+    let behind = cursor.map_or(0, |cursor| cursor.seen.len() as u64 + 1);
+    let mut start = cursor.map_or(0, |cursor| cursor.offset.saturating_sub(behind));
+    let (mut rows, mut total) = range(start, limit + behind)?;
     start = start.min(total);
-    while cursor.is_some() && start > 0 && rows.first().is_none_or(follows) {
+    let unproven = |rows: &[Summary]| {
+        cursor.is_some_and(|cursor| rows.first().is_none_or(|row| row.time <= cursor.time))
+    };
+    while start > 0 && unproven(&rows) {
         let from = start.saturating_sub(STEP);
         let (mut earlier, count) = range(from, start - from)?;
         earlier.append(&mut rows);
@@ -262,7 +295,7 @@ fn list_page(
     let offset = fresh.last().map_or(0, |(_, position)| position + 1);
     let rows: Vec<Summary> = fresh.into_iter().map(|(row, _)| row).collect();
     Ok(Page {
-        next: Cursor::after(&rows, offset, cursor).filter(|_| more),
+        next: Cursor::after(&rows, offset, cursor)?.filter(|_| more),
         rows,
         total: Some(total),
     })
@@ -319,8 +352,10 @@ pub fn search(client: &Client, args: &SearchArgs) -> Result<CommandResult, AppEr
             body.insert(key.into(), value.into());
         }
     }
+    // Bounds go out a second wider, whichever inclusivity Dooray applies,
+    // and the user's are enforced on the rows.
     if let Some(since) = args.since {
-        body.insert("since".into(), time::format_korea(since).into());
+        body.insert("since".into(), time::format_korea(since - 1).into());
     }
     body.insert("order".into(), "-createdAt".into());
     let path = format!("/v2/wapi/mails/search?preview={preview}");
@@ -352,23 +387,28 @@ pub fn search(client: &Client, args: &SearchArgs) -> Result<CommandResult, AppEr
             .collect::<Result<_, _>>()?;
         Ok((rows, found.total_count))
     };
-    let page = search_page(fetch, *limit, cursor.as_ref(), args.before)?;
+    let page = search_page(fetch, *limit, cursor.as_ref(), args.since, args.before)?;
     let capped = page.total.is_some_and(|total| total >= SEARCH_CAP);
     render("search", page, capped)
 }
 
-/// One page of a newest-first search. Each continuation searches again
-/// with `before` just past the cursor's second, from Dooray's first page, so
-/// no page lies past Dooray's 2000-hit cap and messages that left the
-/// result in between move nothing.
+/// One page of a newest-first search received in `[since, before)`. Each
+/// continuation searches again with `before` just past the cursor's second,
+/// from Dooray's first page, so no page lies past Dooray's 2000-hit cap and
+/// messages that left the result in between move nothing.
 fn search_page(
     mut fetch: impl FnMut(Option<i64>, u64, u64) -> Result<Fetched, AppError>,
     limit: u64,
     cursor: Option<&Cursor>,
+    since: Option<i64>,
     before: Option<i64>,
 ) -> Result<Page, AppError> {
-    let follows = |row: &Summary| cursor.is_none_or(|cursor| cursor.follows(row));
-    let before = match (cursor, before) {
+    let wanted = |row: &Summary| {
+        cursor.is_none_or(|cursor| cursor.follows(row))
+            && since.is_none_or(|since| row.time >= since)
+            && before.is_none_or(|before| row.time < before)
+    };
+    let upstream_before = match (cursor, before) {
         (Some(cursor), Some(before)) => Some(before.min(cursor.time + 1)),
         (Some(cursor), None) => Some(cursor.time + 1),
         (None, before) => before,
@@ -376,30 +416,41 @@ fn search_page(
     // Messages already shown at the cursor's second come back first.
     let size = limit + cursor.map_or(0, |cursor| cursor.seen.len() as u64);
     let (mut fresh, mut consumed, mut first_total, mut total) = (Vec::new(), 0, None, 0);
+    let mut latest = i64::MAX;
     for page in 0.. {
         if page == MAX_CALLS {
             return Err(stale_cursor());
         }
         let rows;
-        (rows, total) = fetch(before, page, size)?;
-        if rows.windows(2).any(|pair| pair[1].time > pair[0].time) {
-            return Err(AppError::shape(
-                "Dooray search results are not ordered by received time",
-            ));
+        (rows, total) = fetch(upstream_before, page, size)?;
+        for row in &rows {
+            if row.time > latest {
+                return Err(AppError::shape(
+                    "Dooray search results are not ordered by received time",
+                ));
+            }
+            latest = row.time;
         }
         first_total.get_or_insert(total);
         consumed += rows.len() as u64;
         let full = rows.len() as u64 == size;
-        fresh.extend(rows.into_iter().filter(follows));
+        fresh.extend(rows.into_iter().filter(wanted));
         if fresh.len() as u64 >= limit || !full || consumed >= total {
             break;
         }
     }
-    let more = fresh.len() as u64 > limit || consumed < total;
+    // A capped count says nothing about what lies past it.
+    let more = fresh.len() as u64 > limit || consumed < total || total >= SEARCH_CAP;
+    if more && fresh.is_empty() {
+        return Err(AppError::limit(
+            "Dooray reports more matches than kaist-mail can reach from here",
+        )
+        .with_hint("Narrow the search, for example with --from, --subject or --before."));
+    }
     fresh.truncate(limit as usize);
     let offset = cursor.map_or(0, |cursor| cursor.offset) + fresh.len() as u64;
     Ok(Page {
-        next: Cursor::after(&fresh, offset, cursor).filter(|_| more),
+        next: Cursor::after(&fresh, offset, cursor)?.filter(|_| more),
         rows: fresh,
         total: first_total.filter(|_| cursor.is_none()),
     })
@@ -434,4 +485,49 @@ fn render(command: &'static str, page: Page, capped: bool) -> Result<CommandResu
         next_cursor: page.next.map(|cursor| cursor.to_string()),
     });
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, time: &str) -> Summary {
+        let item: Item = serde_json::from_value(json!({
+            "id": id,
+            "createdAt": format!("2026-11-12T{time}+09:00"),
+            "mailSummary": {"flags": {"read": false, "favorite": false}},
+            "users": {},
+        }))
+        .unwrap();
+        item.summary(None, false).unwrap()
+    }
+
+    #[test]
+    fn search_order_is_checked_across_responses() {
+        let cursor: Cursor = format!(
+            "1.{}.1",
+            time::parse_bound("2026-11-12T10:00:00+09:00").unwrap()
+        )
+        .parse()
+        .unwrap();
+        let mut pages = vec![
+            vec![
+                row("4", "09:58:00"),
+                row("5", "09:50:00"),
+                row("6", "09:40:00"),
+            ],
+            vec![
+                row("8", "10:00:01"),
+                row("2", "10:00:00"),
+                row("1", "10:00:00"),
+                row("3", "09:55:00"),
+            ],
+        ];
+        let fetch = |_: Option<i64>, _: u64, _: u64| Ok((pages.pop().unwrap(), 2000));
+        let error = search_page(fetch, 3, Some(&cursor), None, None);
+        assert_eq!(
+            error.err().map(|error| error.code),
+            Some("UPSTREAM_SHAPE_CHANGED")
+        );
+    }
 }
