@@ -16,6 +16,15 @@ Dooray endpoints are in [PROTOCOL.md](PROTOCOL.md).
   - `parse`: page structure only, never visible text.
 - `client`: exact-origin wapi client. A 401 or a redirect to `/auth/signin` or `/idp/*` is `AUTH_EXPIRED`; the
   envelope header is checked before the result, and `isSuccessful:false` is `UPSTREAM_ERROR`.
+- `query`: `list` and `search`. Cursors key on the last row's second and ids; list continuation re-finds that place
+  in Dooray's numbered pages, search continuation narrows `before` and restarts at page 0, passing the 2000-hit cap.
+  `message`: Dooray list item to the thin row and human table. `time`: RFC 3339 and KST date bounds.
+- `mail`: one message as an agent reads it: `MailId`, the detail fetch (marks read), headers, attachments, body
+  window. `html_text`: HTML body to plain text (html2text with a decorator: quotes `> `, links `text <url>`, images
+  `[alt]`).
+- `download`: `download` (attachments) and `export` (raw EML) to new private files; filename sanitizing and
+  caseless collision checks. `client/transfer`: streaming transfers under `--max-seconds`/`--stall-seconds` with
+  exact-size checks. `private_fs::publish_new`: no-overwrite publication (hidden 0600 temporary, link or copy).
 - `http`: one blocking transport with per-hop redirect policy, deadlines and bounded reads; a 307/308 never re-sends
   a body to another origin.
 - `output`, `error`: the JSON envelope, terminal sanitization (control and bidi characters only), error codes.

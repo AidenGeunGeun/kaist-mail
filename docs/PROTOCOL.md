@@ -23,6 +23,7 @@ endpoints, so the CLI uses these web endpoints.
 - Business errors are HTTP 200 with `isSuccessful:false`, a negative integer `resultCode`, `result:null`, and a
   `resultMessage` localized to the account locale. Seen: `-100207` mail deleted or not found, `-200200` invalid
   request, `-200100` empty `mailIdList`, `-100300` server error, `-13207002` search keyword too long.
+  kaist-mail shows only `resultCode`: `resultMessage` can quote request or mail data.
 - An unknown path returns 404 with a Spring error body. No rate-limit headers appeared at 2-3 requests/s.
 
 ## Endpoints
@@ -77,8 +78,13 @@ Move, delete and send endpoints live in the same web-app module and are not mapp
 - NFC-normalize keywords: the NFD form of a Hangul word matches nothing.
 - Keywords of 100 or more characters fail with `-13207002`.
 - `totalCount` caps at 2000 and pages past 2000 hits come back empty.
+- Hits are ordered by `mailSummary.sentAt` (the Date header); `order:"-createdAt"` means that order and `"createdAt"`
+  reverses it. Rows without `sentAt` sort by `createdAt`. `since` and `before` are both inclusive, on `sentAt`.
+- kaist-mail continues past the 2000-hit cap by narrowing `before` to the last shown sent second; a live walk
+  returned 8,774 hits with none repeated (2026-11-12).
 - Response: `result.totalCount`, `contents[]` with `id`, `sentAt`, `matchedFiles[]`, and `references.mailMap`
-  (id to the full list item). Read subjects and fields from `mailMap`; `contents[].subject` is a highlight form.
+  (id to the full list item). Read subjects and fields from `mailMap`; `contents[].subject` is a highlight form
+  and `contents[].sentAt` is always the epoch. With no hits, `references` is absent.
 
 ## Detail and read state
 
@@ -92,10 +98,14 @@ Move, delete and send endpoints live in the same web-app module and are not mapp
 
 ## Attachments
 
-- `fileList[]`: `name` (UTF-8, NFC), `size`, `mimeType`, `extension`, `partNumber`, `downloadUrl`, `bigfile`,
-  `driveLink`, `encrypted`, `deleted`, `forbiddenExtensionFlag`, `toBeDeletedAt`.
-- Fetch `downloadUrl` as given, relative to the site root; it is same-origin without redirects, needs only
-  `SESSION`, and its `Content-Length` equals `size`. Prefixing `/v2/wapi` returns error `-100300`.
+- `fileList[]` has 16 keys: `id`, `name` (UTF-8, NFC), `size`, `mimeType`, `extension`, `partNumber`, `downloadUrl`,
+  `messagePartId`, `bigfile`, `driveLink`, `encrypted`, `deleted`, `deletedAt`, `forbiddenExtensionFlag`, `createdAt`,
+  `toBeDeletedAt`. No `bigfile`, `driveLink` or `encrypted` attachment has been observed.
+- `downloadUrl` is `/mails/{id}/parts/{n}?type=raw&t=...` from the site root: same-origin, no redirects, needs only
+  `SESSION`, `Content-Length` equals `size`. `t` is not required; without `type=raw` the URL answers 400 HTML, and
+  prefixing `/v2/wapi` returns error `-100300`.
+- `Range` is ignored (200, full length, no `Accept-Ranges`). Transfers of a few MB or more are sometimes closed
+  10-35 KB short of `Content-Length`, over HTTP/1.1 and HTTP/2 alike; a repeat of the same item can complete.
 - Take the filename from `fileList[].name`. `Content-Disposition` depends on the User-Agent and can omit the
   filename entirely for non-ASCII names.
 

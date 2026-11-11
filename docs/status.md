@@ -20,17 +20,18 @@ What kaist-mail can do now, what is proven live, and what comes next.
 | Session storage (`SESSION` only, no expiry), expiry detection | yes | storage yes |
 | `folders` | yes | yes |
 | Session renewal without the phone | no | no |
-| list, search | no | no |
-| read, attachments | no | no |
+| `list`, `search` (thin rows, cursors past the 2000-hit cap) | yes | yes |
+| `read` (bounded text, marks read), `download`, `export` (leaves unread) | yes | yes, small files |
+| Large transfers (several MB) | partial: truncated transfers fail cleanly | no |
 
 ## Next
 
-1. Land the milestone 1 audit fixes, then have the user run the live login and `folders`.
-2. Round 2: query workflow (folders with counts, list, search, continuation) and reading workflow (text body,
-   attachments, streamed downloads) in parallel worktrees; then workflow measurements on a synthetic large mailbox.
+1. Session renewal without the phone (branch `session-renew`).
+2. Retry for truncated large transfers; workflow measurements on a synthetic large mailbox.
 
 ## Open questions
 
 - Server idle timeout of the `SESSION` cookie.
-- Whether the `t` parameter on attachment URLs is required.
-- Shape of user folders and of mark-read/unread responses.
+- Shape of user folders, and of `bigfile`/`driveLink`/`encrypted` attachments.
+- Why Dooray closes large transfers early, and whether a whole-transfer retry completes them.
+- A search from 2000-01-01 returned 5 of 6 archive messages; probably one without a sent date.
