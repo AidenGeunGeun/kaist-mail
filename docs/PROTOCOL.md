@@ -14,6 +14,8 @@ endpoints, so the CLI uses these web endpoints.
   `Dooray-Mail-Api-Version: 1.2`. Version 1.2 reports truncated recipient lists as `toMore`/`ccMore`/`bccMore`.
 - gzip is honoured. Responses over a few MB are slow (a 9 MB EML took about 49 s); stream downloads
   with long timeouts and keep list pages at 100 items or fewer.
+- `members/me` `sessionCheckedAt` moves with interactive calls but not with `Dooray-User-Interaction: false`; Dooray
+  exposes no remaining session time. An anonymous `SESSION` survived 50 min idle.
 - Signed out or expired: wapi returns 401 with an empty body; `/mails/*/parts` returns 401 `text/html`;
   page routes 302 to `/auth/signin`.
 
@@ -115,3 +117,13 @@ Move, delete and send endpoints live in the same web-app module and are not mapp
 
 `resultCode`, system folder `name` and `type`, flags, `threadMail.type`, `mimeType`, and ids. Only
 `resultMessage` and display labels follow the account locale.
+
+## KAIST SSO
+
+- The SSO session is `JSESSIONID` (host `sso.kaist.ac.kr`, `Path=/auth`, HttpOnly, no expiry); `WHATAP` and `SCOUTER`
+  are monitoring cookies. An anonymous SSO session lapsed between 25 and 35 min idle.
+- Dooray's SAML request lands on `/auth/kaist/user/saml/login/link/redirect`. Without an SSO session it redirects to
+  `login/view`; with one it answers the SAMLResponse form, which is how kaist-mail renews.
+- Password-step codes: `SS0001` signed in (trusted device), `SS0098` second factor needed, `SS0099` register device,
+  `SS0004`/`SS0005`/`SS0006` password change required (first login, reset, too old). The page offers a
+  `changeLater` deferral; kaist-mail does not use it.

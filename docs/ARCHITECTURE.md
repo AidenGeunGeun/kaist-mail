@@ -41,4 +41,13 @@ Dooray endpoints are in [PROTOCOL.md](PROTOCOL.md).
    to `https://kaist.gov-dooray.com/idp/login/saml/process`. There is no RelayState: Dooray keeps the return URL in
    its anonymous `SESSION`, which must survive the flow.
 5. The new `SESSION` is saved only after `GET /v2/wapi/mail-folders?type=system` succeeds with it. SSO cookies are
-   discarded.
+   kept in a separate jar in `session.json` and sent only to `sso.kaist.ac.kr`.
+
+## Renewal
+
+`auth/renew`: on a Dooray 401, `Client::signed` renews once per command and resends the request. Renewal replays
+the SAML request with the saved SSO session, then tries a remembered password with codes refused; it never starts
+Easy Login or sends a code. `state/session.lock` serializes sign-in, renewal and logout. `state/password-hold.json`
+gates every automatic password use: it is written before the password leaves and cleared only when KAIST accepts it,
+so a refused, cut-off or code-requiring attempt is never repeated until the next explicit `auth login`.
+`state/session.used` records the last accepted call.
