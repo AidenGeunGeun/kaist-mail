@@ -2,9 +2,17 @@
 //! bounds. KAIST accounts use Korea time, so dates without a time are read,
 //! and instants sent to Dooray are written, at +09:00.
 
+use std::ops::RangeInclusive;
+
 const KOREA: i64 = 9 * 3600;
 
-/// Unix seconds of `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`; a fraction is dropped.
+/// Instants kaist-mail accepts: those a second either side of which still
+/// has a four-digit year in Korea time, so a widened bound stays writable.
+pub const RANGE: RangeInclusive<i64> =
+    (-62_167_219_200 - KOREA + 1)..=(253_402_300_799 - KOREA - 1);
+
+/// Unix seconds of `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)` within [`RANGE`];
+/// a fraction is dropped.
 pub fn parse_rfc3339(value: &str) -> Option<i64> {
     let (date, rest) = value.split_once('T')?;
     let (clock, offset) = match rest.strip_suffix('Z') {
@@ -35,13 +43,13 @@ pub fn parse_rfc3339(value: &str) -> Option<i64> {
     }
     let seconds =
         number(hour, 0..=23)? * 3600 + number(minute, 0..=59)? * 60 + number(second, 0..=59)?;
-    Some(day(date)? * 86_400 + seconds - offset)
+    Some(day(date)? * 86_400 + seconds - offset).filter(|instant| RANGE.contains(instant))
 }
 
 /// A `--since`/`--before` value: `YYYY-MM-DD` (midnight, Korea time) or RFC
 /// 3339 in whole seconds, the precision Dooray reports received times in.
 pub fn parse_bound(value: &str) -> Result<i64, String> {
-    let midnight = || Some(day(value)? * 86_400 - KOREA);
+    let midnight = || Some(day(value)? * 86_400 - KOREA).filter(|instant| RANGE.contains(instant));
     let instant = || parse_rfc3339(value).filter(|_| !value.contains('.'));
     midnight().or_else(instant).ok_or_else(|| {
         "expected YYYY-MM-DD (Korea time) or RFC 3339 in whole seconds such as 2026-11-12T09:00:00+09:00".into()
@@ -129,6 +137,8 @@ mod tests {
         assert_eq!(parse_bound("2026-11-01"), Ok(1_793_458_800));
         assert_eq!(format_korea(1_794_444_067), "2026-11-12T09:41:07+09:00");
         assert_eq!(format_korea(-1), "1970-01-01T08:59:59+09:00");
+        assert_eq!(format_korea(RANGE.start() - 1), "0000-01-01T00:00:00+09:00");
+        assert_eq!(format_korea(RANGE.end() + 1), "9999-12-31T23:59:59+09:00");
         for invalid in [
             "2026-02-29",
             "2026-11-12T24:00:00+09:00",
@@ -136,6 +146,8 @@ mod tests {
             "2026-11-12 09:41:07+09:00",
             "26-11-12",
             "2026-11-12T12:00:00.5+09:00",
+            "0000-01-01",
+            "9999-12-31T23:59:59+09:00",
         ] {
             assert!(parse_bound(invalid).is_err(), "{invalid}");
         }

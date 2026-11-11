@@ -9,6 +9,7 @@ use crate::{
     client::Client,
     error::AppError,
     html_text,
+    message::EmailUser,
     output::{self, CommandResult},
 };
 
@@ -95,21 +96,10 @@ struct User {
     email_user: Option<EmailUser>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EmailUser {
-    name: Option<String>,
-    email_address: String,
-}
-
 impl User {
     fn label(&self) -> String {
         match &self.email_user {
-            Some(EmailUser {
-                name: Some(name),
-                email_address,
-            }) if !name.is_empty() && name != email_address => format!("{name} <{email_address}>"),
-            Some(user) => user.email_address.clone(),
+            Some(user) => user.label(),
             None => format!("({})", self.kind),
         }
     }

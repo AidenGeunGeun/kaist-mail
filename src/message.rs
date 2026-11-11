@@ -50,12 +50,25 @@ struct Address {
     email_user: Option<EmailUser>,
 }
 
+/// A person as Dooray names one in any message field.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EmailUser {
+pub struct EmailUser {
     #[serde(default)]
     name: Option<String>,
     email_address: String,
+}
+
+impl EmailUser {
+    /// `Name <address>`, or the bare address when the name is blank or repeats it.
+    pub fn label(&self) -> String {
+        let name = self.name.as_deref().map(str::trim).unwrap_or_default();
+        if name.is_empty() || name == self.email_address {
+            self.email_address.clone()
+        } else {
+            format!("{name} <{}>", self.email_address)
+        }
+    }
 }
 
 /// A message row. Flags appear only when true, `files` only when nonzero.
@@ -111,16 +124,12 @@ impl Item {
         };
         let time = time::parse_rfc3339(key)
             .ok_or_else(|| AppError::shape("Dooray listed a message without an RFC 3339 time"))?;
-        let from = match self.users.from.and_then(|from| from.email_user) {
-            Some(EmailUser {
-                name: Some(name),
-                email_address,
-            }) if !name.trim().is_empty() && name != email_address => {
-                format!("{} <{email_address}>", name.trim())
-            }
-            Some(user) => user.email_address,
-            None => String::new(),
-        };
+        let from = self
+            .users
+            .from
+            .and_then(|from| from.email_user)
+            .map(|user| user.label())
+            .unwrap_or_default();
         Ok(Summary {
             id: self.id,
             at: self.created_at,
@@ -172,4 +181,25 @@ pub fn table(rows: &[Summary]) -> String {
         }
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EmailUser;
+
+    #[test]
+    fn labels_drop_blank_or_repeated_names() {
+        for (name, label) in [
+            (Some(" "), "x@example.test"),
+            (None, "x@example.test"),
+            (Some("x@example.test"), "x@example.test"),
+            (Some(" 학사팀 "), "학사팀 <x@example.test>"),
+        ] {
+            let user = EmailUser {
+                name: name.map(str::to_owned),
+                email_address: "x@example.test".into(),
+            };
+            assert_eq!(user.label(), label, "{name:?}");
+        }
+    }
 }

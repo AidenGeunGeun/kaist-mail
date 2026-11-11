@@ -1,7 +1,10 @@
 //! `list` and `search` against a synthetic Dooray mailbox that pages by
 //! number, caps search at 2000 hits, and changes between commands.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, LazyLock, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use serde_json::{Value, json};
 
@@ -88,8 +91,10 @@ fn folder_id(name: &str) -> String {
 
 /// Dooray's list item, from the recorded fixture with this message's fields.
 fn item(message: &Message) -> Value {
-    let mut item: Value =
-        serde_json::from_str::<Value>(LIST).unwrap()["result"]["contents"][0].clone();
+    static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
+        serde_json::from_str::<Value>(LIST).unwrap()["result"]["contents"][0].clone()
+    });
+    let mut item = TEMPLATE.clone();
     item["id"] = json!(message.id);
     item["createdAt"] = json!(message.at);
     item["mailSummary"]["sentAt"] = json!(message.sent);
@@ -228,9 +233,20 @@ fn list(mailbox: &[Message], target: &str) -> Response {
 }
 
 fn dooray(mailbox: &Mailbox) -> Server {
+    dooray_with(mailbox, |_, _| {})
+}
+
+/// A mailbox server that first lets `change` alter the mailbox, given the
+/// number of requests answered before this one.
+fn dooray_with(
+    mailbox: &Mailbox,
+    change: impl Fn(&mut Vec<Message>, usize) + Send + Sync + 'static,
+) -> Server {
     let mailbox = Arc::clone(mailbox);
+    let answered = AtomicUsize::new(0);
     Server::new(move |request: &Request| {
-        let mailbox = mailbox.lock().unwrap();
+        let mut mailbox = mailbox.lock().unwrap();
+        change(&mut mailbox, answered.fetch_add(1, Ordering::SeqCst));
         match (
             request.method.as_str(),
             request.target.split_once('?').unwrap().0,
@@ -489,44 +505,6 @@ fn search_rows_name_their_folder_and_hits_come_from_the_mail_map() {
 }
 
 #[test]
-fn list_continuation_finds_unshown_messages_that_moved_ahead_within_a_tied_second() {
-    let mailbox: Mailbox = Arc::new(Mutex::new(messages(60)));
-    let inbox: Vec<String> = mailbox
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|message| message.folder == "inbox")
-        .map(|message| message.id.clone())
-        .collect();
-    let server = dooray(&mailbox);
-    let home = Home::new(Some(&live()));
-
-    let (mut shown, meta) = page(&home, &server, &["--json", "list"], None);
-    // Dooray may order a tied second differently on the next call: four
-    // unshown messages of it move ahead of the five shown ones.
-    mailbox.lock().unwrap()[15..24].rotate_left(5);
-    let (more, meta) = page(
-        &home,
-        &server,
-        &["--json", "list"],
-        meta["next_cursor"].as_str(),
-    );
-    shown.extend(more);
-    let (more, meta) = page(
-        &home,
-        &server,
-        &["--json", "list"],
-        meta["next_cursor"].as_str(),
-    );
-    shown.extend(more);
-    assert_eq!(meta.get("next_cursor"), None);
-    shown.sort();
-    let mut expected = inbox;
-    expected.sort();
-    assert_eq!(shown, expected);
-}
-
-#[test]
 fn search_refuses_to_end_silently_inside_a_second_with_too_many_hits() {
     let mut mailbox = messages(2001);
     for message in &mut mailbox[..2000] {
@@ -579,7 +557,7 @@ fn cursors_out_of_range_are_usage_errors_before_any_request() {
         ),
         (
             &["list"],
-            "20.1794452400.446000000000000000000000".to_owned(),
+            "20.1794452400.446000000000000000000000000000000000".to_owned(),
         ),
         (
             &["search", "x"],
@@ -590,10 +568,143 @@ fn cursors_out_of_range_are_usage_errors_before_any_request() {
             "20.-9223372036854775808.4460000000000000000".to_owned(),
         ),
         (&["search", "x"], format!("20.1794452400.{many}")),
+        // Its continuation would need a `before` in year 10000.
+        (&["search", "x"], "0.253402268399.1".to_owned()),
     ] {
         let args = [&["--json"], command, &["--cursor", &cursor]].concat();
         let output = home.run(Some(&server), &args);
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
     }
     assert!(server.requests().is_empty());
+}
+
+/// `sizes.len()` groups of inbox messages, each group received and sent at
+/// one second, groups a second apart, ids counting down from the newest.
+fn tied(sizes: &[usize]) -> Vec<Message> {
+    let mut all = messages(sizes.iter().sum());
+    let seconds = sizes
+        .iter()
+        .enumerate()
+        .flat_map(|(group, size)| vec![group; *size]);
+    for (message, group) in all.iter_mut().zip(seconds) {
+        let at = format!("2026-11-12T09:40:{:02}+09:00", 59 - group);
+        (message.at, message.sent, message.folder) = (at.clone(), at, "inbox");
+    }
+    all
+}
+
+/// Reorders every run of messages sharing a second, as Dooray may on any response.
+fn shuffle_ties(mailbox: &mut [Message], seed: usize) {
+    let mut state = seed as u64 * 2_654_435_761 + 1;
+    let mut start = 0;
+    while start < mailbox.len() {
+        let end = start
+            + mailbox[start..]
+                .iter()
+                .take_while(|m| m.at == mailbox[start].at)
+                .count();
+        for index in (start + 1..end).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            mailbox.swap(index, start + (state % (index - start + 1) as u64) as usize);
+        }
+        start = end;
+    }
+}
+
+fn permutations(items: Vec<usize>) -> Vec<Vec<usize>> {
+    if items.len() <= 1 {
+        return vec![items];
+    }
+    (0..items.len())
+        .flat_map(|index| {
+            let mut rest = items.clone();
+            let first = rest.remove(index);
+            permutations(rest).into_iter().map(move |mut tail| {
+                tail.insert(0, first);
+                tail
+            })
+        })
+        .collect()
+}
+
+fn assert_each_once(shown: &[String], all: &[Message], context: &str) {
+    let mut shown = shown.to_vec();
+    shown.sort();
+    let mut expected: Vec<String> = all.iter().map(|message| message.id.clone()).collect();
+    expected.sort();
+    assert_eq!(shown, expected, "{context}");
+}
+
+#[test]
+fn walks_show_every_message_once_when_ties_reorder_on_every_response() {
+    let home = Home::new(Some(&live()));
+    for (sizes, limit, seeds) in [(&[5, 5, 2][..], "2", 12), (&[30, 30, 30, 30, 30], "7", 4)] {
+        for seed in 0..seeds {
+            let all = tied(sizes);
+            let mailbox: Mailbox = Arc::new(Mutex::new(all.clone()));
+            let server = dooray_with(&mailbox, move |mailbox, answered| {
+                shuffle_ties(mailbox, seed * 1000 + answered)
+            });
+            for args in [
+                &["--json", "list", "--limit", limit][..],
+                &["--json", "search", "kaist", "--limit", limit],
+            ] {
+                let (shown, _) = walk(&home, &server, args);
+                assert_each_once(&shown, &all, &format!("{args:?} {sizes:?} seed {seed}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn search_continuing_inside_a_tied_second_survives_every_reordering_of_it() {
+    let home = Home::new(Some(&live()));
+    let all = tied(&[3, 5, 1]);
+    for order in permutations((3..8).collect()) {
+        let mailbox: Mailbox = Arc::new(Mutex::new(all.clone()));
+        let (base, reordered) = (all.clone(), order.clone());
+        // After the first page, which ends inside the tied second, responses
+        // alternate between the original order and this one.
+        let server = dooray_with(&mailbox, move |mailbox, answered| {
+            mailbox.clone_from(&base);
+            if answered % 2 == 0 && answered > 0 {
+                for (slot, from) in reordered.iter().enumerate() {
+                    mailbox[3 + slot] = base[*from].clone();
+                }
+            }
+        });
+        let (shown, _) = walk(
+            &home,
+            &server,
+            &["--json", "search", "kaist", "--limit", "4"],
+        );
+        assert_each_once(&shown, &all, &format!("order {order:?}"));
+    }
+}
+
+#[test]
+fn cursors_continue_at_the_ends_of_representable_time() {
+    let home = Home::new(Some(&live()));
+    let mut all = tied(&[1, 1]);
+    all[0].sent = "1970-01-01T08:59:59+09:00".into();
+    all[1].sent = "1970-01-01T08:59:58+09:00".into();
+    let mailbox: Mailbox = Arc::new(Mutex::new(all.clone()));
+    let server = dooray(&mailbox);
+    let (shown, _) = walk(
+        &home,
+        &server,
+        &["--json", "search", "kaist", "--limit", "1"],
+    );
+    assert_each_once(&shown, &all, "sent before 1970");
+
+    let (_, _) = page(
+        &home,
+        &server,
+        &["--json", "search", "kaist"],
+        Some("0.253402268398.1"),
+    );
+    let body: Value = serde_json::from_str(&server.recorded().last().unwrap().body).unwrap();
+    assert_eq!(body["before"], "9999-12-31T23:59:59+09:00");
 }
