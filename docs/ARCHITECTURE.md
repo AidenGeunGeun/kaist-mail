@@ -16,8 +16,9 @@ Dooray endpoints are in [PROTOCOL.md](PROTOCOL.md).
   - `parse`: page structure only, never visible text.
 - `client`: exact-origin wapi client. A 401 or a redirect to `/auth/signin` or `/idp/*` is `AUTH_EXPIRED`; the
   envelope header is checked before the result, and `isSuccessful:false` is `UPSTREAM_ERROR`.
-- `query`: `list` and `search`. Cursors key on the last row's second and ids; list continuation re-finds that place
-  in Dooray's numbered pages, search continuation narrows `before` and restarts at page 0, passing the 2000-hit cap.
+- `query`: `list` and `search`. Cursors key on the last row's second and ids; every page is chosen from one Dooray response
+  that holds the cursor's whole second, picking rows by second and id; search narrows `before` and reads page 0,
+  passing the 2000-hit cap.
   `message`: Dooray list item to the thin row and human table. `time`: RFC 3339 and KST date bounds.
 - `mail`: one message as an agent reads it: `MailId`, the detail fetch (marks read), headers, attachments, body
   window. `html_text`: HTML body to plain text (html2text with a decorator: quotes `> `, links `text <url>`, images

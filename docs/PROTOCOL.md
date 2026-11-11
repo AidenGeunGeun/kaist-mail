@@ -56,8 +56,10 @@ Move, delete and send endpoints live in the same web-app module and are not mapp
 
 ## Listing: `GET /v2/wapi/mails`
 
-- Scope: `folderName` or `folderId`, or `exceptFolders=a,b`. Paging: `page` (0-based) and `size` (up to 1000).
+- Scope: `folderName` or `folderId`, or `exceptFolders=a,b`. Paging: `page` (0-based) and `size`. Pages of 1000 rows
+  arrived truncated (about 2 MB) for list and search; 500 arrived whole but slowly (list 6-20 s, search 36 s).
   `order=-createdAt` (newest first) or `createdAt`. Pages are offsets, so mail arriving between calls shifts them.
+  Order within a tied second was stable on repeat; kaist-mail does not rely on it.
 - Filters: `read=false`, `favorited=true`, `hasAttachment=true`. There is no date filter; use search.
 - `preview=true` fills `mailSummary.previewText` (up to about 200 characters).
 - `excludeTotalCount=true` skips counting; `totalCount` is then page*size plus the number returned.
