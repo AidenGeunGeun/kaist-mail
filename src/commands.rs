@@ -29,6 +29,8 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             output::result("auth.status", &status, human)
         }
         Command::Folders => folders(&Client::new(base, cli.timeout)?),
+        Command::List(args) => crate::query::list(&Client::new(base, cli.timeout)?, args),
+        Command::Search(args) => crate::query::search(&Client::new(base, cli.timeout)?, args),
     }
 }
 
@@ -135,6 +137,7 @@ fn folders(client: &Client) -> Result<CommandResult, AppError> {
     result.meta = Some(ListMeta {
         returned: folders.len(),
         total: Some(total),
+        ..ListMeta::default()
     });
     Ok(result)
 }

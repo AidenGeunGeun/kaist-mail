@@ -574,6 +574,7 @@ version = "0.1.0"
 dependencies = [
  "cbc",
  "clap",
+ "icu_normalizer",
  "kisaseed",
  "rpassword",
  "rustls",

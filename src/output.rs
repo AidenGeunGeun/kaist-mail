@@ -5,11 +5,17 @@ use crate::error::AppError;
 
 pub const SCHEMA_VERSION: &str = "1";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ListMeta {
     pub returned: usize,
     /// What Dooray reports as the full count; `None` when it does not say.
     pub total: Option<u64>,
+    /// `total` hit Dooray's count limit: there are at least that many.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub total_capped: bool,
+    /// Pass back as `--cursor` for the rows after this page; absent at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug)]

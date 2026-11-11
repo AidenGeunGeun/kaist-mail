@@ -8,8 +8,11 @@ mod error;
 #[path = "../tests/fixture/server.rs"]
 mod fixture_server;
 mod http;
+mod message;
 mod output;
 mod private_fs;
+mod query;
+mod time;
 mod url;
 
 use std::process::ExitCode;

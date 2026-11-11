@@ -13,7 +13,7 @@ use ureq::Agent;
 use crate::{
     auth,
     error::AppError,
-    http::{self, Failure, Follow, Method, Response},
+    http::{self, Failure, Follow, Method, Payload, Response},
     output,
     url::{Url, is_http_loopback},
 };
@@ -91,6 +91,28 @@ impl Client {
 
     /// GET a wapi path and return its `result`, or the error its `header` reports.
     pub fn wapi<T: DeserializeOwned>(&self, path: &str) -> Result<T, AppError> {
+        self.call(Method::GET, path, None)
+    }
+
+    /// POST a JSON body to a wapi path, answered like [`Client::wapi`].
+    pub fn wapi_post<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<T, AppError> {
+        let payload = Payload {
+            content_type: "application/json",
+            bytes: body.to_string().into_bytes(),
+        };
+        self.call(Method::POST, path, Some(payload))
+    }
+
+    fn call<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<Payload>,
+    ) -> Result<T, AppError> {
         let url = self
             .base
             .join(path)
@@ -100,9 +122,9 @@ impl Client {
             cookie: &self.cookie,
         };
         let request = Follow {
-            method: Method::GET,
+            method,
             url,
-            payload: None,
+            payload,
             max_redirects: 3,
             strict: true,
         };

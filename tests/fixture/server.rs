@@ -14,6 +14,7 @@ pub struct Request {
     pub method: String,
     pub target: String,
     pub headers: Vec<String>,
+    pub body: String,
 }
 
 impl Request {
@@ -161,6 +162,7 @@ impl Server {
                     method: parts.next().unwrap_or_default().into(),
                     target: parts.next().unwrap_or_default().into(),
                     headers,
+                    body: body.to_owned(),
                 };
                 let response = router(&request);
                 let mut headers = format!(
