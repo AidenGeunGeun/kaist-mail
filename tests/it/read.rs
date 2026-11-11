@@ -1,6 +1,10 @@
 //! Reading a message, downloading its attachments and exporting it.
 
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -15,6 +19,7 @@ const DETAIL: &str = include_str!("../fixtures/mail-detail.json");
 const RAW: &[u8] = include_bytes!("../fixtures/mail-raw.eml");
 const DELETED: &str = include_str!("../fixtures/error-mail-deleted.json");
 const DETAIL_PATH: &str = "/v2/wapi/mails/4460000000000000001?render=html";
+const RAW_PATH: &str = "/v2/wapi/mails/4460000000000000001?type=raw";
 const PDF_PATH: &str = "/mails/4460000000000000001/parts/3?type=raw&t=1794400000000000000";
 const DOCX_PATH: &str = "/mails/4460000000000000001/parts/4?type=raw&t=1794400000000000000";
 const PDF_NAME: &str = "2026학년도 봄학기 수강신청 안내.pdf";
@@ -292,7 +297,7 @@ fn export_saves_the_raw_message_byte_for_byte_without_reading_it() {
     let home = Home::new(Some(&live()));
     let out = TempDir::new().unwrap();
     let server = Server::new(|request: &Request| match request.target.as_str() {
-        "/v2/wapi/mails/4460000000000000001?type=raw" => Response::bytes("message/rfc822", RAW),
+        RAW_PATH => Response::bytes("message/rfc822", RAW),
         "/v2/wapi/mails/4460000000000000002?type=raw" => {
             Response::bytes("application/json;charset=UTF-8", DELETED)
         }
@@ -316,4 +321,55 @@ fn export_saves_the_raw_message_byte_for_byte_without_reading_it() {
     assert_eq!(error["code"], "UPSTREAM_ERROR");
     assert_eq!(error["details"]["result_code"], -100_207);
     assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn transfers_dooray_cuts_short_start_over_and_give_up_after_three_attempts() {
+    let home = Home::new(Some(&live()));
+    let out = TempDir::new().unwrap();
+    let dir = out.path().to_str().unwrap();
+    let pdf = file_bytes(152_031, 1);
+    let served = AtomicUsize::new(0);
+    let server = Server::new(move |request: &Request| match request.target.as_str() {
+        DETAIL_PATH => Response::bytes("application/json;charset=UTF-8", DETAIL),
+        PDF_PATH if served.fetch_add(1, Ordering::Relaxed) == 0 => {
+            Response::bytes("application/pdf", &pdf[..122_031]).declared_length(152_031)
+        }
+        PDF_PATH => Response::bytes("application/pdf", pdf.clone()),
+        RAW_PATH => Response::bytes("message/rfc822", &RAW[..RAW.len() / 2])
+            .declared_length(RAW.len() as u64),
+        other => panic!("unexpected request {other}"),
+    });
+    let output = home.run(
+        Some(&server),
+        &["--json", "download", ID, "--part", "3", "--out", dir],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        fs::read(out.path().join(PDF_NAME)).unwrap() == file_bytes(152_031, 1),
+        "the saved PDF is not the whole served file"
+    );
+    let warnings = &envelope(&output.stdout)["warnings"];
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|warning| warning.contains("122031 of 152031 bytes")),
+        "{warnings}"
+    );
+
+    let export = home.run(Some(&server), &["--json", "export", ID, "--out", dir]);
+    let error = &envelope(&export.stderr)["error"];
+    assert_eq!(error["code"], "NETWORK_ERROR");
+    assert!(
+        error["message"].as_str().unwrap().contains("3 attempts"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_dir(out.path()).unwrap().count(),
+        1,
+        "only the PDF, no partial or temporary file"
+    );
+    let requests = server.requests();
+    let count = |path: &str| requests.iter().filter(|line| line.contains(path)).count();
+    assert_eq!((count(PDF_PATH), count(RAW_PATH)), (2, 3));
 }

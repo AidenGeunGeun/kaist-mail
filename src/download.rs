@@ -125,11 +125,11 @@ pub fn attachments(
                 out,
             )
         });
-        let (bytes, published) = match saved {
+        let ((bytes, retried), published) = match saved {
             Ok(saved) => saved,
             Err(error) => return Err(with_saved(error, &files)),
         };
-        warnings.extend(published);
+        warnings.extend(retried.into_iter().chain(published));
         files.push(Saved {
             part: file.part,
             path: absolute(path),
@@ -177,7 +177,7 @@ pub fn eml(
     };
     let label = path.display().to_string();
     check_free(&path, &label)?;
-    let (bytes, warnings) = private_fs::publish_new(&path, &label, |file| {
+    let ((bytes, mut warnings), published) = private_fs::publish_new(&path, &label, |file| {
         client.download(
             &format!("/v2/wapi/mails/{id}?type=raw"),
             &format!("message {id}"),
@@ -192,6 +192,7 @@ pub fn eml(
         bytes,
     };
     let human = format!("Saved {} bytes to {}", export.bytes, export.path);
+    warnings.extend(published);
     let mut result = output::result("export", &export, human)?;
     result.warnings = warnings;
     Ok(result)

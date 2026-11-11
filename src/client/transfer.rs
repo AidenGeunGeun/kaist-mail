@@ -13,6 +13,7 @@ use super::{Client, MAX_BODY, Policy, check_header, failure, shape_error};
 use crate::{
     error::AppError,
     http::{self, Follow, Method, Response},
+    url::Url,
 };
 
 const CHUNK: usize = 64 * 1024;
@@ -51,10 +52,28 @@ pub enum Size {
     AtMost(u64),
 }
 
+/// Dooray ends many transfers of a few MB early, at random, and ignores
+/// `Range`; a whole new attempt often completes.
+const ATTEMPTS: usize = 3;
+
+/// Why one attempt failed: Dooray cutting the body short, described for the
+/// user, is worth a new attempt; anything else is final.
+enum Failed {
+    Cut(String),
+    Final(AppError),
+}
+
+impl From<AppError> for Failed {
+    fn from(error: AppError) -> Self {
+        Self::Final(error)
+    }
+}
+
 impl Client {
     /// GETs `target`, a site-root path such as an attachment's `downloadUrl`,
-    /// and streams the body into `file`, returning its length. Errors call it
-    /// `shown`, since the target can carry Dooray's file name.
+    /// and streams the body into `file`, starting over when Dooray cuts it
+    /// short. Returns its length and a warning for each cut attempt. Errors
+    /// call it `shown`, since the target can carry Dooray's file name.
     pub fn download(
         &self,
         target: &str,
@@ -62,13 +81,62 @@ impl Client {
         size: Size,
         limits: Limits,
         file: &mut File,
-    ) -> Result<u64, AppError> {
+    ) -> Result<(u64, Vec<String>), AppError> {
         let url = self
             .base
             .join(target)
             .ok()
             .filter(|url| url.origin() == self.base.origin())
             .ok_or_else(|| AppError::shape("Dooray gave a download link outside Dooray"))?;
+        let mut cuts: Vec<String> = Vec::new();
+        loop {
+            match self.attempt(&url, shown, size, limits, file) {
+                Ok(bytes) => {
+                    let warnings = cuts
+                        .iter()
+                        .enumerate()
+                        .map(|(n, cut)| format!("attempt {} at {shown} {cut}; started over", n + 1))
+                        .collect();
+                    return Ok((bytes, warnings));
+                }
+                Err(Failed::Cut(cut)) => {
+                    cuts.push(cut);
+                    if cuts.len() == ATTEMPTS {
+                        return Err(AppError::network(format!(
+                            "Dooray cut {shown} short on all {ATTEMPTS} attempts: {}",
+                            cuts.join("; ")
+                        ))
+                        .with_hint("Dooray often ends large transfers early; try again later"));
+                    }
+                    file.set_len(0)
+                        .and_then(|()| file.seek(SeekFrom::Start(0)))
+                        .map_err(|error| {
+                            AppError::config(format!("could not restart the download: {error}"))
+                        })?;
+                }
+                Err(Failed::Final(mut error)) => {
+                    if !cuts.is_empty() {
+                        error.message = format!(
+                            "{} on attempt {}, after: {}",
+                            error.message,
+                            cuts.len() + 1,
+                            cuts.join("; ")
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn attempt(
+        &self,
+        url: &Url,
+        shown: &str,
+        size: Size,
+        limits: Limits,
+        file: &mut File,
+    ) -> Result<u64, Failed> {
         let response = self.signed(Some(limits.deadline), |cookie| {
             let agent = http::streaming_agent(limits.remaining()?, limits.stall);
             let mut policy = Policy {
@@ -101,25 +169,24 @@ impl Client {
                 return Err(shape_error(
                     shown,
                     &format!("{declared} bytes for a file Dooray lists as {expected} bytes"),
-                ));
+                )
+                .into());
             }
             (_, Some(declared)) if declared > limit => {
                 return Err(AppError::limit(format!(
                     "Dooray {shown} is larger than {limit} bytes"
-                )));
+                ))
+                .into());
             }
             _ => {}
         }
         let written = copy(response, file, limit, limits)?;
-        let ended_early =
-            || AppError::network(format!("Dooray {shown} ended after {written} bytes"));
-        if declared.is_some_and(|declared| declared != written) {
-            return Err(ended_early());
-        }
         match exact {
             Some(expected) if written == expected => Ok(written),
-            _ if json => Err(envelope_error(shown, file)),
-            Some(_) => Err(ended_early()),
+            _ if json => Err(envelope_error(shown, file).into()),
+            Some(expected) => Err(Failed::Cut(format!(
+                "ended after {written} of {expected} bytes"
+            ))),
             None => Ok(written),
         }
     }
@@ -140,37 +207,51 @@ fn envelope_error(shown: &str, file: &mut File) -> AppError {
     }
 }
 
-fn copy(response: Response, file: &mut File, max: u64, limits: Limits) -> Result<u64, AppError> {
+/// Streams the body into `file` and returns its length, which matches the
+/// declared `Content-Length` if there is one.
+fn copy(response: Response, file: &mut File, max: u64, limits: Limits) -> Result<u64, Failed> {
+    let declared = response.content_length();
+    let progress = |written: u64| match declared {
+        Some(declared) => format!("{written} of {declared} bytes"),
+        None => format!("{written} bytes"),
+    };
     let chunks = read_in_background(response);
     let mut written = 0u64;
     loop {
         let wait = limits.remaining()?.min(limits.stall);
         let chunk = match chunks.recv_timeout(wait) {
-            Ok(Ok(chunk)) if chunk.is_empty() => return Ok(written),
+            Ok(Ok(chunk)) if chunk.is_empty() => {
+                return match declared {
+                    Some(declared) if declared != written => {
+                        Err(Failed::Cut(format!("ended after {}", progress(written))))
+                    }
+                    _ => Ok(written),
+                };
+            }
             Ok(Ok(chunk)) => chunk,
             Ok(Err(_)) | Err(RecvTimeoutError::Timeout) if Instant::now() >= limits.deadline => {
-                return Err(overdue());
+                return Err(overdue().into());
             }
             Ok(Err(error)) => {
-                return Err(AppError::network(format!(
-                    "the download broke off: {error}"
+                return Err(Failed::Cut(format!(
+                    "broke off after {}: {error}",
+                    progress(written)
                 )));
             }
             Err(RecvTimeoutError::Timeout) => {
-                return Err(AppError::network(format!(
-                    "no data arrived for {} s (--stall-seconds)",
-                    limits.stall.as_secs()
+                return Err(Failed::Cut(format!(
+                    "sent nothing for {} s (--stall-seconds) after {}",
+                    limits.stall.as_secs(),
+                    progress(written)
                 )));
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(AppError::internal("the download reader stopped"));
+                return Err(AppError::internal("the download reader stopped").into());
             }
         };
         written += chunk.len() as u64;
         if written > max {
-            return Err(AppError::limit(format!(
-                "the download exceeded {max} bytes"
-            )));
+            return Err(AppError::limit(format!("the download exceeded {max} bytes")).into());
         }
         file.write_all(&chunk)
             .map_err(|error| AppError::config(format!("could not write the download: {error}")))?;

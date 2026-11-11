@@ -122,9 +122,9 @@ pub enum Command {
     Export(ExportArgs),
 }
 
-const TRANSFER_HELP_DOWNLOAD: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long. Each file must be exactly the size Dooray lists.\n\nJSON data: {id, marked_read, files: [{part, path, bytes}]}; path is absolute. If a later file fails, error.details.saved_parts lists the parts already saved. Errors name parts and --out, never Dooray's file names.\n\nExamples:\n  kaist-mail download 4237456781234567890 --out ~/Downloads\n  kaist-mail --json download 4237456781234567890 --part 3 --out notice.pdf";
+const TRANSFER_HELP_DOWNLOAD: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long. A transfer Dooray cuts short or stalls starts over from the beginning, up to 3 attempts in all; warnings list the cut attempts. Each file must be exactly the size Dooray lists.\n\nJSON data: {id, marked_read, files: [{part, path, bytes}]}; path is absolute. If a later file fails, error.details.saved_parts lists the parts already saved. Errors name parts and --out, never Dooray's file names.\n\nExamples:\n  kaist-mail download 4237456781234567890 --out ~/Downloads\n  kaist-mail --json download 4237456781234567890 --part 3 --out notice.pdf";
 
-const TRANSFER_HELP_EXPORT: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long.\n\nJSON data: {id, path, bytes}; path is absolute.\n\nExamples:\n  kaist-mail export 4237456781234567890 --out ~/mail\n  kaist-mail --json export 4237456781234567890 --out notice.eml";
+const TRANSFER_HELP_EXPORT: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long. A transfer Dooray cuts short or stalls starts over from the beginning, up to 3 attempts in all; warnings list the cut attempts.\n\nJSON data: {id, path, bytes}; path is absolute.\n\nExamples:\n  kaist-mail export 4237456781234567890 --out ~/mail\n  kaist-mail --json export 4237456781234567890 --out notice.eml";
 
 #[derive(Args)]
 pub struct ReadArgs {
