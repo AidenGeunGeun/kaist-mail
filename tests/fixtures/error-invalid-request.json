@@ -1,0 +1,8 @@
+{
+  "header": {
+    "resultCode": -200200,
+    "resultMessage": "요청한 내용에 오류가 있습니다. 해당 오류는 서비스 운영자에게 자동으로 보고됩니다.",
+    "isSuccessful": false
+  },
+  "result": null
+}

@@ -1,0 +1,14 @@
+{
+  "header": { "resultCode": 0, "resultMessage": "", "isSuccessful": true },
+  "result": {
+    "totalCount": 6,
+    "contents": [
+      { "id": "3100000000000000001", "name": "inbox", "imapName": null, "type": "system", "totalCount": 8343, "unreadCount": 2785, "subscribed": true, "createdAt": "2021-03-02T09:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "12345678901", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": null },
+      { "id": "3100000000000000002", "name": "sent", "imapName": null, "type": "system", "totalCount": 416, "unreadCount": 0, "subscribed": true, "createdAt": "2021-03-02T09:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "234567890", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": null },
+      { "id": "3100000000000000003", "name": "draft", "imapName": null, "type": "system", "totalCount": 10, "unreadCount": 0, "subscribed": true, "createdAt": "2021-03-02T09:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "1234567", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": null },
+      { "id": "3100000000000000004", "name": "archive", "imapName": null, "type": "system", "totalCount": 6, "unreadCount": 0, "subscribed": true, "createdAt": "2021-03-02T09:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "654321", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": null },
+      { "id": "3100000000000000005", "name": "spam", "imapName": null, "type": "system", "totalCount": 109, "unreadCount": 74, "subscribed": true, "createdAt": "2021-03-02T09:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "9876543", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": null },
+      { "id": "3100000000000000006", "name": "trash", "imapName": null, "type": "system", "totalCount": 22, "unreadCount": 2, "subscribed": true, "createdAt": "2021-03-02T09:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "345678", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": null }
+    ]
+  }
+}

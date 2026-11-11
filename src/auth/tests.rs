@@ -29,10 +29,30 @@ fn json(body: &str) -> Response {
     Response::bytes("application/json", body.to_owned())
 }
 
-/// Dooray: sign-in entry, IdP chooser, SAML request, assertion consumer.
+/// How the fixture servers deviate from a well-behaved sign-in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    Normal,
+    /// The SSO login page is rendered for another agent.
+    ForeignAgent,
+    /// Dooray's ACS sends the browser back to sign-in.
+    Bounce,
+    /// Dooray's ACS redirects to the SSO origin with this status.
+    AcsToSso(&'static str),
+    /// The SSO link page holds a GET form to an ordinary Dooray page.
+    GetForm,
+    /// Dooray's ACS finishes without authenticating the session.
+    Anonymous,
+    /// Dooray's SAML request redirects to a third origin.
+    Offsite,
+}
+
+/// Dooray: sign-in entry, IdP chooser, SAML request, assertion consumer, and
+/// the folder API, which answers only an authenticated session.
 fn dooray_route(
     sso: Arc<OnceLock<String>>,
-    accept: bool,
+    offsite: String,
+    variant: Variant,
 ) -> impl Fn(&Request) -> Response + Send + Sync {
     move |request| match (request.method.as_str(), path(&request.target)) {
         ("GET", "/auth/signin") => redirect("/idp/init?redirectUrl=%2F")
@@ -43,13 +63,31 @@ fn dooray_route(
         )),
         ("GET", "/idp/login/saml") => redirect(&format!(
             "{}auth/kaist/user/saml/login/link/redirect?SAMLRequest=req&SigAlg=alg&Signature=sig",
-            sso.get().unwrap()
+            if variant == Variant::Offsite {
+                &offsite
+            } else {
+                sso.get().unwrap()
+            }
         )),
-        ("POST", ACS) if accept => redirect("/auth/signin/finalize?nextUrl=%2F")
-            .header("Set-Cookie", "SESSION=authed; Path=/; HttpOnly")
-            .header("Set-Cookie", "scoped=x; Path=/idp"),
-        ("POST", ACS) => redirect("/auth/signin"),
+        ("POST", ACS) => match variant {
+            Variant::Bounce => redirect("/auth/signin"),
+            Variant::AcsToSso(status) => {
+                redirect(&format!("{}{}", sso.get().unwrap(), &ACS[1..])).status(status)
+            }
+            Variant::Anonymous => redirect("/auth/signin/finalize?nextUrl=%2F"),
+            _ => redirect("/auth/signin/finalize?nextUrl=%2F")
+                .header("Set-Cookie", "SESSION=authed; Path=/; HttpOnly")
+                .header("Set-Cookie", "scoped=x; Path=/idp"),
+        },
         ("GET", "/auth/signin/finalize") => Response::html("<script>location.href='/'</script>"),
+        ("GET", "/v2/wapi/mail-folders")
+            if request.header_value("cookie") == Some("SESSION=authed") =>
+        {
+            json(
+                r#"{"header":{"isSuccessful":true,"resultCode":0,"resultMessage":""},"result":{"totalCount":0,"contents":[]}}"#,
+            )
+        }
+        ("GET", "/v2/wapi/mail-folders") => Response::html("").status("401 Unauthorized"),
         (method, path) => panic!("unexpected Dooray request {method} {path}"),
     }
 }
@@ -57,9 +95,13 @@ fn dooray_route(
 /// KAIST SSO in its SAML variant. `password_result` answers the password step.
 fn sso_route(
     dooray: Arc<OnceLock<String>>,
-    agent: &'static str,
+    variant: Variant,
     password_result: Arc<Mutex<String>>,
 ) -> impl Fn(&Request) -> Response + Send + Sync {
+    let agent = match variant {
+        Variant::ForeignAgent => "kaist-prod-klms",
+        _ => "kaist-prod-dooray",
+    };
     move |request| match path(&request.target) {
         "/auth/kaist/user/saml/login/link/redirect" if request.target.contains("SAMLRequest") => {
             redirect("/auth/kaist/user/login/view")
@@ -68,6 +110,12 @@ fn sso_route(
         "/auth/kaist/user/login/view" => Response::html(format!(
             r#"<form><input type="hidden" id="agt_id" name="agt_id" value="{agent}"></form>"#
         )),
+        "/auth/kaist/user/saml/login/link/redirect" if variant == Variant::GetForm => {
+            Response::html(format!(
+                r#"<form action="{}auth/signin/finalize"><input type="hidden" name="notSAMLResponse" value="x"></form>"#,
+                dooray.get().unwrap(),
+            ))
+        }
         "/auth/kaist/user/saml/login/link/redirect" => Response::html(format!(
             r#"<form method="post" action="{}{}"><input type="hidden" name="SAMLResponse" value="PHNhbWw+"></form><script>document.forms[0].submit()</script>"#,
             dooray.get().unwrap(),
@@ -84,13 +132,14 @@ fn sso_route(
             json(r#"{"errorCode":"SS0001"}"#)
         }
         "/auth/kaist/user/login/check/policy" => json(r#"{"result":true}"#),
-        other => panic!("unexpected SSO request {other}"),
+        other => Response::html(format!("unexpected SSO request {other}")).status("404 Not Found"),
     }
 }
 
 struct Fixture {
     dooray: Server,
     sso: Server,
+    offsite: Server,
     dooray_url: Url,
     sso_url: Url,
     password_result: Arc<Mutex<String>>,
@@ -100,14 +149,19 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(agent: &'static str, accept: bool) -> Self {
+    fn new(variant: Variant) -> Self {
         let root = tempfile::tempdir().unwrap();
         let (dooray_cell, sso_cell) = (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
         let password_result = Arc::new(Mutex::new(r#"{"result_code":"SS0098"}"#.to_owned()));
-        let dooray = Server::new(dooray_route(sso_cell.clone(), accept));
+        let offsite = Server::new(|_: &Request| Response::html(""));
+        let dooray = Server::new(dooray_route(
+            sso_cell.clone(),
+            format!("{}/", offsite.url()),
+            variant,
+        ));
         let sso = Server::new(sso_route(
             dooray_cell.clone(),
-            agent,
+            variant,
             password_result.clone(),
         ));
         dooray_cell.set(format!("{}/", dooray.url())).unwrap();
@@ -121,6 +175,7 @@ impl Fixture {
             sso_url: Url::parse(sso_cell.get().unwrap()).unwrap(),
             dooray,
             sso,
+            offsite,
             password_result,
             dirs: Dirs {
                 config: root.path().join("config/kaist-mail"),
@@ -190,7 +245,7 @@ fn password() -> LoginOptions {
 
 #[test]
 fn easy_login_follows_dooray_saml_to_sso_and_posts_the_response_back() {
-    let fixture = Fixture::new("kaist-prod-dooray", true);
+    let fixture = Fixture::new(Variant::Normal);
     let result = fixture.login(&LoginOptions::default(), true).unwrap();
     assert_eq!(result.data["cookies"], serde_json::json!(["SESSION"]));
 
@@ -207,7 +262,8 @@ fn easy_login_follows_dooray_saml_to_sso_and_posts_the_response_back() {
             "/idp/multi",
             "/idp/login/saml",
             ACS,
-            "/auth/signin/finalize"
+            "/auth/signin/finalize",
+            "/v2/wapi/mail-folders"
         ]
     );
     let acs = &fixture.dooray.recorded()[4];
@@ -239,7 +295,7 @@ fn easy_login_follows_dooray_saml_to_sso_and_posts_the_response_back() {
 
 #[test]
 fn password_login_without_a_terminal_runs_in_two_steps() {
-    let fixture = Fixture::new("kaist-prod-dooray", true);
+    let fixture = Fixture::new(Variant::Normal);
     fixture.remember_password();
 
     let error = fixture.login(&password(), false).unwrap_err();
@@ -271,7 +327,7 @@ fn sso_results_map_by_code_whatever_the_message_language() {
         "아이디 또는 비밀번호가 일치하지 않습니다.",
         "The ID or password is incorrect.",
     ] {
-        let fixture = Fixture::new("kaist-prod-dooray", true);
+        let fixture = Fixture::new(Variant::Normal);
         fixture.remember_password();
         *fixture.password_result.lock().unwrap() =
             format!(r#"{{"errorCode":"EAU001","errorMessage":"{message}"}}"#);
@@ -288,7 +344,7 @@ fn sso_results_map_by_code_whatever_the_message_language() {
 
 #[test]
 fn a_login_page_for_another_sso_agent_is_refused_before_credentials() {
-    let fixture = Fixture::new("kaist-prod-klms", true);
+    let fixture = Fixture::new(Variant::ForeignAgent);
     let error = fixture.login(&LoginOptions::default(), true).unwrap_err();
     assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED");
     assert_eq!(
@@ -302,7 +358,7 @@ fn a_login_page_for_another_sso_agent_is_refused_before_credentials() {
 
 #[test]
 fn dooray_bouncing_the_saml_response_back_to_sign_in_saves_nothing() {
-    let fixture = Fixture::new("kaist-prod-dooray", false);
+    let fixture = Fixture::new(Variant::Bounce);
     let error = fixture.login(&LoginOptions::default(), true).unwrap_err();
     assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED");
     assert!(
@@ -311,4 +367,58 @@ fn dooray_bouncing_the_saml_response_back_to_sign_in_saves_nothing() {
         error.message
     );
     assert!(!fixture.dirs.session().exists());
+}
+
+/// A failed sign-in must save nothing and leave no session behind.
+fn assert_refused(fixture: &Fixture, error: &AppError) {
+    assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED", "{}", error.message);
+    assert!(!fixture.dirs.session().exists());
+}
+
+#[test]
+fn the_saml_request_may_only_lead_to_the_sso_origin() {
+    let fixture = Fixture::new(Variant::Offsite);
+    let error = fixture.login(&LoginOptions::default(), true).err().unwrap();
+    assert_refused(&fixture, &error);
+    assert!(fixture.offsite.requests().is_empty());
+}
+
+#[test]
+fn the_assertion_submission_never_leaves_dooray() {
+    for status in ["307 Temporary Redirect", "302 Found"] {
+        let fixture = Fixture::new(Variant::AcsToSso(status));
+        let error = fixture.login(&LoginOptions::default(), true).err().unwrap();
+        assert_refused(&fixture, &error);
+        let after_acs = fixture
+            .sso
+            .recorded()
+            .into_iter()
+            .any(|r| r.line.contains(ACS));
+        assert!(
+            !after_acs,
+            "{status}: the submission followed Dooray to the SSO origin"
+        );
+    }
+}
+
+#[test]
+fn only_a_saml_post_to_the_acs_that_authenticates_dooray_counts_as_login() {
+    for variant in [Variant::GetForm, Variant::Anonymous] {
+        let fixture = Fixture::new(variant);
+        let error = fixture.login(&LoginOptions::default(), true).err().unwrap();
+        assert_refused(&fixture, &error);
+    }
+}
+
+#[test]
+fn unknown_sso_codes_are_named_only_when_they_look_like_codes() {
+    for (code, shown) in [("XYZ123", true), ("COOKIE-CANARY; x=1", false)] {
+        let fixture = Fixture::new(Variant::Normal);
+        fixture.remember_password();
+        *fixture.password_result.lock().unwrap() = format!(r#"{{"errorCode":"{code}"}}"#);
+        let error = fixture.login(&password(), false).err().unwrap();
+        assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED");
+        assert_eq!(error.message.contains(code), shown, "{}", error.message);
+        assert!(!error.message.contains("CANARY"), "{}", error.message);
+    }
 }

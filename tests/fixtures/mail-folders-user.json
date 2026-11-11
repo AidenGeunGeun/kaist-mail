@@ -1,0 +1,10 @@
+{
+  "header": { "resultCode": 0, "resultMessage": "", "isSuccessful": true },
+  "result": {
+    "totalCount": 2,
+    "contents": [
+      { "id": "3100000000000000101", "name": "연구실 공지", "imapName": "연구실 공지", "type": "user", "totalCount": 120, "unreadCount": 3, "subscribed": true, "createdAt": "2024-09-01T10:15:30+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "45678901", "sharedMailMemberId": null, "parentFolderId": null, "displayOrder": 1 },
+      { "id": "3100000000000000102", "name": "Receipts", "imapName": "연구실 공지/Receipts", "type": "user", "totalCount": 15, "unreadCount": 0, "subscribed": true, "createdAt": "2024-09-02T08:00:00+09:00", "openedFlag": false, "imapNoselectFlag": false, "mimeSize": "1234567", "sharedMailMemberId": null, "parentFolderId": "3100000000000000101", "displayOrder": 1 }
+    ]
+  }
+}

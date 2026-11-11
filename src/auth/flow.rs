@@ -133,8 +133,22 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
             )))
         }
         _ => Err(AppError::auth_protocol(format!(
-            "KAIST SSO returned unknown result code {code:?}"
+            "KAIST SSO returned unknown result code {}",
+            shown(code)
         ))),
+    }
+}
+
+/// A result code for an error message, quoted only when it looks like one:
+/// the field is server text and could carry anything.
+fn shown(code: &str) -> String {
+    let plausible = (1..=16).contains(&code.len())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    match plausible {
+        true => format!("{code:?}"),
+        false => format!("({} characters, not shown)", code.chars().count()),
     }
 }
 
@@ -161,7 +175,8 @@ fn easy_approved(code: &str) -> Result<bool, AppError> {
         ),
         "E004" => denied("Easy Login expired", "Start a new Easy Login request."),
         other => Err(AppError::auth_protocol(format!(
-            "KAIST SSO returned unknown result code {other:?}"
+            "KAIST SSO returned unknown result code {}",
+            shown(other)
         ))),
     }
 }
@@ -440,7 +455,8 @@ fn second_factor(
         }
         other => {
             return Err(AppError::auth_protocol(format!(
-                "KAIST returned unknown verification-send code {other:?}"
+                "KAIST returned unknown verification-send code {}",
+                shown(other)
             )));
         }
     }
@@ -495,7 +511,8 @@ fn easy_login(
     }
     if !matches!(code, "" | "SS0001") {
         return Err(AppError::auth_protocol(format!(
-            "KAIST returned unknown Easy Login init code {code:?}"
+            "KAIST returned unknown Easy Login init code {}",
+            shown(code)
         )));
     }
     let (_, challenge) =
@@ -596,7 +613,7 @@ fn handoff(transport: &mut SsoTransport, url: Url, html: &str) -> Result<(), App
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        transport.post(form.action.as_str(), &fields)?.0
+        transport.submit_assertion(&form.action, &fields)?
     };
     if !transport.is_dooray_origin(&url) || is_signin_path(url.path()) {
         return Err(AppError::auth_protocol(format!(
@@ -657,7 +674,8 @@ fn register_device(transport: &mut SsoTransport) -> Result<(), AppError> {
     let code = result_code(&response)?;
     if !matches!(code, "" | "SS0001") {
         return Err(AppError::auth_protocol(format!(
-            "KAIST returned unknown device-registration code {code:?}"
+            "KAIST returned unknown device-registration code {}",
+            shown(code)
         )));
     }
     let device = response

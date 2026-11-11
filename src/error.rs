@@ -100,6 +100,19 @@ impl AppError {
     }
 }
 
+/// A JSON decoding failure by kind and position only: serde's own message can
+/// quote the input, which may be mail data or a secret.
+pub fn json_problem(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let kind = match error.classify() {
+        Category::Io => "an unreadable document",
+        Category::Syntax => "malformed JSON",
+        Category::Eof => "truncated JSON",
+        Category::Data => "an unexpected field, type or value",
+    };
+    format!("{kind} at line {} column {}", error.line(), error.column())
+}
+
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)

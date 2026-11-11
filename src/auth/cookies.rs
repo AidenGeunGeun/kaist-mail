@@ -31,13 +31,19 @@ pub fn valid_cookie(name: &str, value: &str) -> bool {
             .all(|byte| (0x20..0x7f).contains(&byte) && byte != b';')
 }
 
+/// Whether a cookie with this expiry may still be sent at `now`; the one rule
+/// for the login jar and the saved session.
+pub fn live(expires_at: Option<u64>, now: u64) -> bool {
+    expires_at.is_none_or(|at| at > now)
+}
+
 /// Trusted-device identifiers follow the cookie-value rule: whatever KAIST
 /// sends is kept as long as it cannot break out of a header.
 fn valid_device(value: &str) -> bool {
     valid_cookie("device", value)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Cookie {
     name: String,
     value: String,
@@ -52,7 +58,7 @@ struct Cookie {
 
 /// Cookies set during one login, plus trusted-device identifiers. It is also
 /// the on-disk form inside a pending login (re-checked by [`Jar::checked`]).
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jar {
     cookies: Vec<Cookie>,
     devices: Vec<String>,
@@ -125,7 +131,7 @@ impl Jar {
             Some(age) => Some(now.saturating_add_signed(age)),
             None => expires,
         };
-        remove |= expires_at.is_some_and(|at| at <= now);
+        remove |= !live(expires_at, now);
         self.cookies.retain(|cookie| {
             !(cookie.name == name && cookie.domain == domain && cookie.path == path)
         });
@@ -143,8 +149,9 @@ impl Jar {
         Ok(())
     }
 
-    /// Re-check a jar read from disk, which is untrusted input.
-    pub fn checked(self) -> Result<Self, AppError> {
+    /// Re-check a jar read from disk, which is untrusted input, and drop the
+    /// cookies that expired while it was stored.
+    pub fn checked(mut self) -> Result<Self, AppError> {
         let sound = self.cookies.iter().all(|saved| {
             valid_cookie(&saved.name, &saved.value)
                 && !saved.domain.is_empty()
@@ -155,6 +162,8 @@ impl Jar {
                 && Url::parse(&saved.source_origin).is_ok()
         }) && self.devices.iter().all(|device| valid_device(device));
         if sound {
+            let now = epoch_now();
+            self.cookies.retain(|cookie| live(cookie.expires_at, now));
             Ok(self)
         } else {
             Err(AppError::config(
@@ -166,12 +175,14 @@ impl Jar {
     /// The `Cookie` header for a request to `url`.
     pub fn header(&self, url: &Url) -> Option<String> {
         let host = url.host_str()?;
+        let now = epoch_now();
         let values = self
             .cookies
             .iter()
             .filter(|cookie| {
                 let path = url.path();
-                in_domain(host, &cookie.domain)
+                live(cookie.expires_at, now)
+                    && in_domain(host, &cookie.domain)
                     && (path == cookie.path
                         || path.starts_with(&format!("{}/", cookie.path.trim_end_matches('/'))))
                     && (!cookie.secure || url.scheme() == "https")
@@ -181,14 +192,17 @@ impl Jar {
         (!values.is_empty()).then(|| values.join("; "))
     }
 
-    /// The site-wide cookies Dooray itself issued: the only ones persisted.
+    /// The site-wide `SESSION` cookie Dooray itself issued: the only one
+    /// persisted. Dooray authenticates by it alone (`JSESSIONID` and the
+    /// monitoring cookies get 401 on their own).
     pub fn dooray_cookies(&self, dooray: &Url) -> Vec<StoredCookie> {
         let origin = dooray.origin().ascii_serialization();
         let mut result = self
             .cookies
             .iter()
             .filter(|cookie| {
-                cookie.source_origin == origin
+                cookie.name == "SESSION"
+                    && cookie.source_origin == origin
                     && cookie.path == "/"
                     && (!cookie.secure || dooray.scheme() == "https")
             })
@@ -302,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn only_site_wide_dooray_cookies_persist_and_the_parent_domain_is_sent() {
+    fn only_the_dooray_session_cookie_persists_even_with_a_parent_domain() {
         let mut jar = Jar::default();
         for bad in ["a b=c", "novalue", "a=caf\u{e9}", "x=1; Domain=example.com"] {
             let error = capture(&mut jar, SSO, bad).unwrap_err();
@@ -316,14 +330,19 @@ mod tests {
         )
         .unwrap();
         capture(&mut jar, DOORAY, "scoped=1; Path=/idp").unwrap();
+        capture(&mut jar, DOORAY, "JSESSIONID=host; Path=/; Secure").unwrap();
+        capture(&mut jar, DOORAY, "SCOUTER=apm; Path=/; Max-Age=60").unwrap();
         let owned = StoredCookie {
             name: "SESSION".into(),
             value: "owned".into(),
             expires_at: None,
         };
-        assert_eq!(dooray(&jar), vec![owned]);
+        assert!(dooray(&jar) == vec![owned]);
         let header = jar.header(&Url::parse(DOORAY).unwrap()).unwrap();
-        assert_eq!(header, "SESSION=owned");
+        assert!(
+            header.split("; ").any(|pair| pair == "SESSION=owned"),
+            "{header}"
+        );
     }
 
     #[test]
@@ -343,8 +362,9 @@ mod tests {
             "c=3; Path=/; expires=Thu, 28-Feb-2030 23:59:59 GMT",
         )
         .unwrap();
-        let expiry = dooray(&jar)
-            .into_iter()
+        let expiry = jar
+            .cookies
+            .iter()
             .map(|cookie| cookie.expires_at.unwrap())
             .collect::<Vec<_>>();
         assert!((3600..=3610).contains(&(expiry[0] - epoch_now())));
@@ -358,8 +378,29 @@ mod tests {
             let mut jar = Jar::default();
             capture(&mut jar, DOORAY, "a=1; Path=/").unwrap();
             capture(&mut jar, DOORAY, deletion).unwrap();
-            assert!(dooray(&jar).is_empty(), "{deletion}");
+            assert!(jar.cookies.is_empty(), "{deletion}");
         }
+    }
+
+    #[test]
+    fn expired_cookies_are_never_sent_even_from_a_restored_jar() {
+        let cookie = |name: &str, expires_at: u64| {
+            serde_json::json!({"name": name, "value": "v", "domain": "kaist.gov-dooray.com",
+                "path": "/", "secure": false, "expires_at": expires_at,
+                "source_origin": "https://kaist.gov-dooray.com"})
+        };
+        let later = epoch_now() + 3_600;
+        let saved = serde_json::json!({"cookies": [cookie("JSESSIONID", 1), cookie("SESSION", later)], "devices": []});
+        let restored: Jar = serde_json::from_value(saved).unwrap();
+        let url = Url::parse(DOORAY).unwrap();
+        assert_eq!(restored.header(&url).as_deref(), Some("SESSION=v"));
+        let checked = restored.checked().unwrap();
+        assert_eq!(checked.header(&url).as_deref(), Some("SESSION=v"));
+        assert_eq!(
+            checked.cookies.len(),
+            1,
+            "restoration drops the expired cookie"
+        );
     }
 
     #[test]
@@ -370,7 +411,7 @@ mod tests {
         capture(&mut jar, DOORAY, "SESSION=owned; Path=/; Max-Age=60").unwrap();
         jar.remember_device("dev").unwrap();
         let back: Jar = serde_json::from_str(&serde_json::to_string(&jar).unwrap()).unwrap();
-        assert_eq!(back.clone().checked().unwrap(), jar);
+        assert!(back.clone().checked().unwrap() == jar);
         let mut evil = jar.clone();
         evil.cookies[0].value = "x; injected=y".into();
         assert!(evil.checked().is_err());

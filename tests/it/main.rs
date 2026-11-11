@@ -15,7 +15,8 @@ use serde_json::Value;
 use server::{Request, Response, Server};
 use tempfile::TempDir;
 
-const FOLDERS: &str = r#"{"header":{"isSuccessful":true,"resultCode":0,"resultMessage":""},"result":{"totalCount":3,"contents":[{"id":"1001","name":"Inbox"},{"id":1002,"name":"받은편지함/연구실"},{"id":"1003","name":"\u001b[31mred\u001b[0m"}]}}"#;
+const SYSTEM: &str = include_str!("../fixtures/mail-folders-system.json");
+const USER: &str = include_str!("../fixtures/mail-folders-user.json");
 
 /// A HOME whose XDG state directory has a Hangul name, holding `session`.
 struct Home {
@@ -64,9 +65,16 @@ fn live() -> String {
     session(r#"{"name":"SESSION","value":"synthetic-session"}"#)
 }
 
-fn api(body: &'static str) -> Server {
-    Server::new(move |request: &Request| {
-        assert_eq!(request.target, "/v2/wapi/mail-folders");
+/// Dooray's folder API with the synthetic fixtures; one user folder name
+/// carries a terminal escape.
+fn folders_api() -> Server {
+    Server::new(|request: &Request| {
+        let user = USER.replace(r#""name": "Receipts""#, r#""name": "\u001b[31mReceipts""#);
+        let body = match request.target.as_str() {
+            "/v2/wapi/mail-folders?type=system&size=10000&page=0" => SYSTEM.to_owned(),
+            "/v2/wapi/mail-folders?type=user&size=10000&page=0" => user,
+            other => panic!("unexpected request {other}"),
+        };
         Response::bytes("application/json;charset=UTF-8", body)
     })
 }
@@ -76,33 +84,42 @@ fn envelope(output: &[u8]) -> Value {
 }
 
 #[test]
-fn folders_keep_korean_names_intact_in_json_and_terminal_output() {
-    let server = api(FOLDERS);
+fn folders_list_system_and_user_folders_with_korean_names_intact() {
+    let server = folders_api();
     let home = Home::new(Some(&live()));
 
     let output = home.run(Some(&server), &["--json", "folders"]);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#""name":"받은편지함/연구실""#), "{stdout}");
+    assert!(stdout.contains(r#""name":"연구실 공지""#), "{stdout}");
     let json = envelope(stdout.as_bytes());
     assert_eq!(json["command"], "folders");
+    let data = json["data"].as_array().unwrap();
     assert_eq!(
-        json["data"][1],
-        serde_json::json!({"id":"1002","name":"받은편지함/연구실"})
+        data[0],
+        serde_json::json!({"id":"3100000000000000001","name":"inbox","type":"system","total":8343,"unread":2785})
     );
-    assert_eq!(json["meta"], serde_json::json!({"returned":3,"total":3}));
+    assert_eq!(
+        data[7],
+        serde_json::json!({"id":"3100000000000000102","name":"\u{1b}[31mReceipts","type":"user","total":15,"unread":0,"parent":"3100000000000000101"})
+    );
+    assert_eq!(json["meta"], serde_json::json!({"returned":8,"total":8}));
     let request = &server.recorded()[0];
-    assert_eq!(
-        request.header_value("cookie"),
-        Some("SESSION=synthetic-session")
-    );
+    for (name, value) in [
+        ("cookie", "SESSION=synthetic-session"),
+        ("dooray-caller", "WEB"),
+        ("dooray-api-version", "1.1"),
+        ("dooray-mail-api-version", "1.2"),
+    ] {
+        assert_eq!(request.header_value(name), Some(value), "{name}");
+    }
 
     let output = home.run(Some(&server), &["folders"]);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(
-        stdout,
-        "ID\tNAME\n1001\tInbox\n1002\t받은편지함/연구실\n1003\t[31mred[0m\n"
-    );
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines[0], "ID\tUNREAD\tTOTAL\tNAME");
+    assert_eq!(lines[7], "3100000000000000101\t3\t120\t연구실 공지");
+    assert_eq!(lines[8], "3100000000000000102\t0\t15\t[31mReceipts");
 }
 
 #[test]
@@ -130,22 +147,83 @@ fn a_rejected_or_redirected_session_is_auth_expired() {
 }
 
 #[test]
-fn dooray_errors_keep_their_code_and_localized_message() {
-    for message in ["권한이 없습니다.", "Permission denied."] {
-        let body = format!(
-            r#"{{"header":{{"isSuccessful":false,"resultCode":-403,"resultMessage":"{message}"}},"result":null}}"#
-        );
+fn dooray_errors_report_their_code_whatever_the_result_and_message_language() {
+    let inline = |message: &str, result: &str| {
+        format!(
+            r#"{{"header":{{"isSuccessful":false,"resultCode":-403,"resultMessage":"{message}"}},"result":{result}}}"#
+        )
+    };
+    let korean =
+        "요청한 내용에 오류가 있습니다. 해당 오류는 서비스 운영자에게 자동으로 보고됩니다.";
+    for (body, code, message) in [
+        (
+            include_str!("../fixtures/error-invalid-request.json").to_owned(),
+            -200200,
+            korean,
+        ),
+        (
+            inline("Permission denied.", "{}"),
+            -403,
+            "Permission denied.",
+        ),
+        (inline("", "[]"), -403, ""),
+    ] {
         let server =
             Server::new(move |_: &Request| Response::bytes("application/json", body.clone()));
         let output = Home::new(Some(&live())).run(Some(&server), &["--json", "folders"]);
-        assert_eq!(output.status.code(), Some(31));
+        assert_eq!(output.status.code(), Some(31), "{message}");
         let error = &envelope(&output.stderr)["error"];
         assert_eq!(error["code"], "UPSTREAM_ERROR");
         assert_eq!(
             error["details"],
-            serde_json::json!({"result_code": -403, "result_message": message})
+            serde_json::json!({"result_code": code, "result_message": message})
         );
     }
+}
+
+#[test]
+fn errors_never_echo_mail_data_server_text_or_rejected_secrets() {
+    let canary = "CANARY";
+    let shape = r#"{"header":{"isSuccessful":true,"resultCode":0},"result":{"totalCount":"PRIVATE-MAIL-BODY-CANARY","contents":[]}}"#;
+    let hostile = format!(
+        r#"{{"header":{{"isSuccessful":false,"resultCode":-1,"resultMessage":"\u001b[2JBad session COOKIE-CANARY {}"}},"result":null}}"#,
+        "x".repeat(500)
+    );
+    for body in [shape.to_owned(), hostile] {
+        let server =
+            Server::new(move |_: &Request| Response::bytes("application/json", body.clone()));
+        let output = Home::new(Some(&live())).run(Some(&server), &["--json", "folders"]);
+        let error = &envelope(&output.stderr)["error"];
+        assert!(
+            !error["message"].as_str().unwrap().contains(canary),
+            "{error}"
+        );
+        if let Some(message) = error["details"]["result_message"].as_str() {
+            assert!(
+                message.chars().count() <= 200 && !message.contains('\u{1b}'),
+                "{message}"
+            );
+        }
+    }
+
+    let output = Home::new(None).run(
+        None,
+        &[
+            "--json",
+            "--base-url",
+            "https://user:password-CANARY@kaist.gov-dooray.com:bogus",
+            "auth",
+            "status",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(canary));
+
+    let session = session(r#"{"name":"SESSION","value":"v","expires_at":"COOKIE-CANARY"}"#);
+    let server = folders_api();
+    let output = Home::new(Some(&session)).run(Some(&server), &["--json", "auth", "status"]);
+    assert_eq!(envelope(&output.stderr)["error"]["code"], "CONFIG_ERROR");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(canary));
 }
 
 #[test]
@@ -154,7 +232,7 @@ fn status_is_secret_free_and_expired_sessions_never_reach_the_network() {
         r#"{"name":"SESSION","value":"synthetic-secret","expires_at":1},{"name":"other","value":"synthetic-secret","expires_at":2}"#,
     );
     let home = Home::new(Some(&expired));
-    let server = api(FOLDERS);
+    let server = folders_api();
     let output = home.run(Some(&server), &["--json", "auth", "status"]);
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();

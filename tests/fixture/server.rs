@@ -13,6 +13,21 @@ use std::{
 pub struct Request {
     pub method: String,
     pub target: String,
+    pub headers: Vec<String>,
+}
+
+impl Request {
+    /// The trimmed value of the first header called `name` (case-insensitive).
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        header_value(&self.headers, name)
+    }
+}
+
+fn header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|header| {
+        let (key, value) = header.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
 }
 
 /// One recorded request: the request line, its header lines, and its body.
@@ -30,10 +45,7 @@ impl Recorded {
 
     /// The trimmed value of the first header called `name` (case-insensitive).
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find_map(|header| {
-            let (key, value) = header.split_once(':')?;
-            key.eq_ignore_ascii_case(name).then(|| value.trim())
-        })
+        header_value(&self.headers, name)
     }
 }
 
@@ -138,16 +150,17 @@ impl Server {
                 let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
                 let mut lines = head.lines();
                 let line = lines.next().unwrap_or_default().to_owned();
-                let headers = lines.map(ToOwned::to_owned).collect();
+                let headers: Vec<String> = lines.map(ToOwned::to_owned).collect();
                 thread_requests.lock().unwrap().push(Recorded {
                     line: line.clone(),
-                    headers,
+                    headers: headers.clone(),
                     body: body.to_owned(),
                 });
                 let mut parts = line.split_whitespace();
                 let request = Request {
                     method: parts.next().unwrap_or_default().into(),
                     target: parts.next().unwrap_or_default().into(),
+                    headers,
                 };
                 let response = router(&request);
                 let mut headers = format!(

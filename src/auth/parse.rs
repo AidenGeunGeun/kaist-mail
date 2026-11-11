@@ -42,17 +42,27 @@ pub struct HandoffForm {
     pub fields: Vec<(String, String)>,
 }
 
-/// The auto-submitting form that carries the `SAMLResponse` back to Dooray.
-/// Only a form whose action is on the Dooray origin is accepted.
+/// Dooray's SAML assertion consumer, the only place an assertion may go.
+pub const ACS_PATH: &str = "/idp/login/saml/process";
+
+/// The auto-submitting form that carries the `SAMLResponse` back to Dooray:
+/// a POST to exactly the ACS on the Dooray origin with a nonempty
+/// `SAMLResponse`. Any other form is ignored.
 pub fn handoff_form(html: &str, document_url: &Url, dooray: &Url) -> Result<HandoffForm, AppError> {
     let document = Html::parse_document(html);
     let inputs = sel("input[name]");
     for form in document.select(&sel("form[action]")) {
+        let post = form
+            .value()
+            .attr("method")
+            .is_some_and(|method| method.eq_ignore_ascii_case("post"));
         let Some(action) = form
             .value()
             .attr("action")
             .and_then(|action| document_url.join(action).ok())
-            .filter(|action| action.origin() == dooray.origin())
+            .filter(|action| {
+                post && action.origin() == dooray.origin() && action.path() == ACS_PATH
+            })
         else {
             continue;
         };
@@ -66,15 +76,15 @@ pub fn handoff_form(html: &str, document_url: &Url, dooray: &Url) -> Result<Hand
             })
             .take(32)
             .collect();
-        if fields.is_empty() {
-            return Err(AppError::auth_protocol(
-                "KAIST SSO handoff form contained no fields",
-            ));
+        if fields
+            .iter()
+            .any(|(name, value)| name == "SAMLResponse" && !value.is_empty())
+        {
+            return Ok(HandoffForm { action, fields });
         }
-        return Ok(HandoffForm { action, fields });
     }
     Err(AppError::auth_protocol(
-        "KAIST SSO did not return a SAML handoff form for Dooray",
+        "KAIST SSO did not return a SAML assertion form for Dooray",
     ))
 }
 
@@ -136,10 +146,11 @@ fn auth_paths(text: &str) -> Vec<String> {
     let mut rest = text;
     while let Some(index) = rest.find("/auth/") {
         rest = &rest[index..];
+        // Plain path characters only: these land in error details.
         let end = rest
-            .find(|c: char| c.is_ascii_whitespace() || "'\"`<>)}]".contains(c))
+            .find(|c: char| !(c.is_ascii_alphanumeric() || "/_.-".contains(c)))
             .unwrap_or(rest.len());
-        paths.push(rest[..end].trim_end_matches([';', ',']).to_owned());
+        paths.push(rest[..end].to_owned());
         rest = &rest[end..];
     }
     paths
@@ -181,5 +192,14 @@ mod tests {
         let form = handoff_form(&html, &document, &dooray).unwrap();
         assert_eq!(form.action.path(), "/idp/login/saml/process");
         assert_eq!(form.fields, [("SAMLResponse".into(), response)]);
+
+        let acs = "https://kaist.gov-dooray.com/idp/login/saml/process";
+        for bad in [
+            format!(r#"<form action="{acs}"><input name="SAMLResponse" value="x"></form>"#),
+            r#"<form method="post" action="/auth/signin/finalize"><input name="SAMLResponse" value="x"></form>"#.into(),
+            format!(r#"<form method="post" action="{acs}"><input name="SAMLResponse" value=""><input name="RelayState" value="r"></form>"#),
+        ] {
+            assert!(handoff_form(&bad, &document, &dooray).is_err(), "{bad}");
+        }
     }
 }

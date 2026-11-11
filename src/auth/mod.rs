@@ -91,7 +91,6 @@ pub struct Remembered {
     pub password_saved: bool,
 }
 
-#[derive(Debug)]
 pub struct AuthSession {
     pub status: AuthStatus,
     /// The unexpired saved cookies; `None` when there are none.
@@ -117,7 +116,7 @@ pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
 }
 
 /// Flags of `kaist-mail auth login`, already parsed.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct LoginOptions {
     pub user: Option<String>,
     pub method: Option<LoginMethod>,
@@ -432,6 +431,22 @@ fn finish_login(
     identity: &Identity,
     mut warnings: Vec<String>,
 ) -> Result<CommandResult, AppError> {
+    // Save only a session Dooray actually treats as signed in.
+    let header = completed
+        .cookies
+        .iter()
+        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+        .collect::<Vec<_>>()
+        .join("; ");
+    crate::client::Client::with_cookie(env.dooray.clone(), header, env.timeout)
+        .wapi::<serde::de::IgnoredAny>(crate::client::SYSTEM_FOLDERS)
+        .map_err(|error| match error.code {
+            "AUTH_EXPIRED" => AppError::auth_protocol(
+                "Dooray did not accept the session the KAIST SSO sign-in produced",
+            ),
+            _ => error,
+        })
+        .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
     let cookie_names: Vec<_> = completed.cookies.iter().map(|c| c.name.clone()).collect();
     let device_count = completed.devices.len();
     let session_path = env.dirs.session();

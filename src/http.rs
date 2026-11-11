@@ -238,7 +238,8 @@ pub struct Follow {
 }
 
 /// Sends the request and follows redirects by hand. 307/308 keep the method
-/// and body; any other redirect drops the body and turns every method except
+/// and body, and are refused ([`Failure::InvalidLocation`]) when that body
+/// would go to another origin; any other redirect drops the body and turns every method except
 /// HEAD into GET. The agent's global timeout bounds the whole chain, not each
 /// hop.
 pub fn follow(
@@ -287,7 +288,11 @@ pub fn follow(
         redirects += 1;
         let next = url.join(&location).map_err(|_| Failure::InvalidLocation)?;
         policy.allow(&next).map_err(Failure::Refused)?;
-        if !matches!(status, 307 | 308) {
+        let keeps_body = matches!(status, 307 | 308);
+        if keeps_body && payload.is_some() && next.origin() != url.origin() {
+            return Err(Failure::InvalidLocation);
+        }
+        if !keeps_body {
             if method != Method::HEAD {
                 method = Method::GET;
             }
@@ -388,6 +393,27 @@ mod tests {
                 "POST through {status}, not strict"
             );
         }
+    }
+
+    #[test]
+    fn a_body_is_never_resent_to_another_origin() {
+        let other = Server::new(|_| Served::bytes("text/plain", "stolen"));
+        let target = format!("{}/next", other.url());
+        let server = Server::new(move |_| {
+            Served::bytes("text/plain", "")
+                .status("307 Temporary Redirect")
+                .header("Location", &target)
+        });
+        let request = Follow {
+            method: Method::POST,
+            url: Url::parse(&format!("{}/start", server.url())).unwrap(),
+            payload: Some(Payload::form([("a", "1")])),
+            max_redirects: 5,
+            strict: true,
+        };
+        let result = follow(&agent(Duration::from_secs(5), None), request, &mut AllowAll);
+        assert!(matches!(result, Err(Failure::InvalidLocation)));
+        assert!(other.requests().is_empty());
     }
 
     #[test]

@@ -191,7 +191,7 @@ pub fn with_cleanup_warnings(mut error: AppError, warnings: &[String]) -> AppErr
 
 // ---- session ----
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCookie {
     pub name: String,
     pub value: String,
@@ -241,8 +241,9 @@ pub fn load_session(path: &Path, base_url: &Url, now: u64) -> Result<AuthSession
     };
     let stored: StoredSession = serde_json::from_slice(&bytes).map_err(|error| {
         AppError::config(format!(
-            "invalid Dooray session {}: {error}",
-            path.display()
+            "invalid Dooray session {}: {}",
+            path.display(),
+            crate::error::json_problem(&error)
         ))
     })?;
     if stored.version != VERSION {
@@ -260,7 +261,7 @@ pub fn load_session(path: &Path, base_url: &Url, now: u64) -> Result<AuthSession
     let live = stored
         .cookies
         .iter()
-        .filter(|cookie| cookie.expires_at.is_none_or(|at| at > now))
+        .filter(|cookie| cookies::live(cookie.expires_at, now))
         .collect::<Vec<_>>();
     let header = live
         .iter()
@@ -276,7 +277,7 @@ pub fn load_session(path: &Path, base_url: &Url, now: u64) -> Result<AuthSession
         .map(|cookie| CookieStatus {
             name: cookie.name.clone(),
             expires_at: cookie.expires_at,
-            expired: cookie.expires_at.is_some_and(|at| at <= now),
+            expired: !cookies::live(cookie.expires_at, now),
         })
         .collect();
     Ok(AuthSession {
@@ -375,8 +376,8 @@ pub fn load_identity(path: &Path) -> Result<Option<Identity>, AppError> {
         ))
         .with_hint("Run `kaist-mail auth forget` to discard it, then sign in again.")
     };
-    let identity: Identity =
-        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+    let identity: Identity = serde_json::from_slice(&bytes)
+        .map_err(|error| invalid(crate::error::json_problem(&error)))?;
     if identity.version != VERSION {
         return Err(invalid(format!("unsupported version {}", identity.version)));
     }
@@ -391,7 +392,7 @@ pub fn load_identity(path: &Path) -> Result<Option<Identity>, AppError> {
 /// request to the Dooray one), the trusted devices known so far, the last
 /// document URL (for `Referer` and `Origin`) and who is signing in. Never a
 /// password; expires after five minutes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingLogin {
     pub version: u32,
     pub dooray_origin: String,
@@ -510,7 +511,7 @@ mod tests {
                 r#"{{"version":1,"origin":"https://kaist.gov-dooray.com:443","created_at":1,"cookies":[{{"name":"n","value":"{value}"}}]}}"#
             );
             fs::write(&path, body).unwrap();
-            let error = load_session(&path, &dooray(), 0).unwrap_err();
+            let error = load_session(&path, &dooray(), 0).err().unwrap();
             assert_eq!(error.code, "CONFIG_ERROR");
         }
     }
@@ -541,7 +542,7 @@ mod tests {
     fn pending_logins_expire_and_foreign_or_corrupt_files_are_discarded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kaist-mail/pending-login.json");
-        let missing = load_pending(&path, &dooray(), 0).unwrap_err();
+        let missing = load_pending(&path, &dooray(), 0).err().unwrap();
         assert_eq!((missing.code, missing.exit_code()), ("CODE_EXPIRED", 10));
 
         let pending = PendingLogin::new(
@@ -563,12 +564,12 @@ mod tests {
             if garbage {
                 fs::write(&path, "garbage").unwrap();
             }
-            let error = load_pending(&path, &url, now).unwrap_err();
+            let error = load_pending(&path, &url, now).err().unwrap();
             assert!(error.message.contains(message), "{}", error.message);
             assert!(!path.exists(), "{message}: state is deleted");
         }
         save_json(&path, &pending, "pending login").unwrap();
         let loaded = load_pending(&path, &dooray(), pending.expires_at - 1).unwrap();
-        assert_eq!(loaded, pending);
+        assert!(loaded == pending);
     }
 }

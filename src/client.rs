@@ -3,7 +3,10 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{
+    Deserialize,
+    de::{DeserializeOwned, IgnoredAny},
+};
 use serde_json::json;
 use ureq::Agent;
 
@@ -11,10 +14,15 @@ use crate::{
     auth,
     error::AppError,
     http::{self, Failure, Follow, Method, Response},
+    output,
     url::{Url, is_http_loopback},
 };
 
 pub const PRODUCTION: &str = "https://kaist.gov-dooray.com/";
+/// The system folders; small, and also the login's check that a new session
+/// is signed in.
+pub const SYSTEM_FOLDERS: &str = "/v2/wapi/mail-folders?type=system&size=10000&page=0";
+pub const USER_FOLDERS: &str = "/v2/wapi/mail-folders?type=user&size=10000&page=0";
 /// shortcut: whole bodies are buffered; stream once attachment downloads land.
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 
@@ -26,8 +34,8 @@ pub struct Client {
 
 /// A wapi answer: `{"header": {...}, "result": ...}`.
 #[derive(Deserialize)]
-struct Envelope<T> {
-    header: Header,
+struct Envelope<H, T> {
+    header: H,
     result: Option<T>,
 }
 
@@ -43,8 +51,8 @@ struct Header {
 
 /// Accept only the production origin or a loopback fixture.
 pub fn validate_base_url(raw: &str) -> Result<Url, AppError> {
-    let url =
-        Url::parse(raw).map_err(|_| AppError::usage(format!("invalid --base-url {raw:?}")))?;
+    // The rejected value is never echoed: it may carry credentials.
+    let url = Url::parse(raw).map_err(|_| AppError::usage("--base-url is not a valid URL"))?;
     let production = url.origin() == Url::parse(PRODUCTION).expect("valid URL").origin();
     if crate::url::has_userinfo(&url) || !(production || is_http_loopback(&url)) {
         return Err(AppError::usage(
@@ -68,11 +76,17 @@ impl Client {
                 return Err(AppError::auth_required("not signed in to Dooray"));
             }
         };
-        Ok(Self {
+        Ok(Self::with_cookie(base, cookie, timeout))
+    }
+
+    /// A client for a `Cookie` header that is not saved yet, such as the one
+    /// a login is about to save.
+    pub fn with_cookie(base: Url, cookie: String, timeout: u64) -> Self {
+        Self {
             agent: http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8))),
             base,
             cookie,
-        })
+        }
     }
 
     /// GET a wapi path and return its `result`, or the error its `header` reports.
@@ -95,20 +109,32 @@ impl Client {
         let response = http::follow(&self.agent, request, &mut policy).map_err(failure)?;
         let bytes = read_body(response)?;
         let shape = |detail: String| AppError::shape(format!("Dooray {path} answered {detail}"));
-        let envelope: Envelope<T> = serde_json::from_slice(&bytes)
-            .map_err(|error| shape(format!("an unexpected document: {error}")))?;
+        let decode = |error| shape(crate::error::json_problem(&error));
+        // The header decides the outcome before the result's type is checked.
+        let envelope: Envelope<Header, IgnoredAny> =
+            serde_json::from_slice(&bytes).map_err(decode)?;
         let Header {
             is_successful,
             result_code,
             result_message,
         } = envelope.header;
         if !is_successful {
-            // Dooray localizes resultMessage; logic keys on resultCode only.
+            // Logic keys on resultCode. resultMessage is Dooray's localized
+            // reason for the user, kept only in details, bounded and stripped
+            // of control characters because it is untrusted server text.
+            let reason: String = output::sanitize_terminal(&result_message)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(200)
+                .collect();
             return Err(AppError::upstream(format!(
-                "Dooray reported error {result_code} for {path}: {result_message}"
+                "Dooray reported error {result_code} for {path}"
             ))
-            .with_details(json!({"result_code": result_code, "result_message": result_message})));
+            .with_details(json!({"result_code": result_code, "result_message": reason})));
         }
+        let envelope: Envelope<IgnoredAny, T> = serde_json::from_slice(&bytes).map_err(decode)?;
         envelope
             .result
             .ok_or_else(|| shape("success without a result".into()))
@@ -148,9 +174,13 @@ struct Policy<'a> {
 
 impl http::Policy for Policy<'_> {
     fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        // What Dooray's web app sends with every wapi call.
         vec![
             ("cookie", self.cookie.to_owned()),
-            ("accept", "application/json".to_owned()),
+            ("accept", "application/json, text/plain, */*".to_owned()),
+            ("dooray-caller", "WEB".to_owned()),
+            ("dooray-api-version", "1.1".to_owned()),
+            ("dooray-mail-api-version", "1.2".to_owned()),
         ]
     }
 

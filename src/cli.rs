@@ -19,7 +19,8 @@ Exit codes:
   11 AUTH_PROTOCOL_CHANGED   12 CODE_REQUIRED (resume: `auth login --code`)
   13 PERMISSION_DENIED       20 NETWORK_ERROR (retryable)
   21 HTTP_ERROR              30 UPSTREAM_SHAPE_CHANGED
-  31 UPSTREAM_ERROR (details: Dooray's result_code and its localized result_message)
+  31 UPSTREAM_ERROR (details: result_code, and result_message: Dooray's localized
+     reason, untrusted text cut to 200 characters)
   40 CONFIG_ERROR            41 LIMIT_EXCEEDED
   44 NOT_FOUND               50 INTERNAL_ERROR
 
@@ -30,7 +31,7 @@ Safety:
   agent sign-in flow needs the six-digit code KAIST sends by email or SMS; ask the
   user for that code only.";
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "kaist-mail",
     version,
@@ -64,20 +65,20 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 pub enum Command {
     /// Sign in, inspect, or remove the Dooray session.
     #[command(subcommand)]
     Auth(AuthCommand),
     /// List mail folders (system folders and your own) with their ids.
     #[command(
-        long_about = "List every mail folder of the signed-in account with its id and name, in Dooray's order. Folder names are shown exactly as Dooray stores them, Korean included.",
-        after_help = "JSON data: [{id, name}]; meta: {returned, total}.\n\nExamples:\n  kaist-mail folders\n  kaist-mail --json folders"
+        long_about = "List every mail folder of the signed-in account, system folders first, then your own, in Dooray's order, with message and unread counts. System folders are named by stable identifiers (inbox, sent, draft, archive, spam, trash) whatever the account language; your own folders keep their names exactly, Korean included.",
+        after_help = "JSON data: [{id, name, type: system|user, total, unread, parent?}] (parent: the enclosing folder id of a nested user folder); meta: {returned, total}.\n\nExamples:\n  kaist-mail folders\n  kaist-mail --json folders"
     )]
     Folders,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 pub enum AuthCommand {
     /// Sign in through KAIST SSO and save a private session (prompts; secrets are never flags).
     #[command(after_help = LOGIN_HELP)]
@@ -107,7 +108,8 @@ How it works:
   Dooray (kaist.gov-dooray.com) asks KAIST SSO to sign you in with SAML. The
   CLI follows the same pages a browser does: Dooray's sign-in entry, KAIST SSO
   (Easy Login, or password plus an email/SMS code), then hands the SAML answer
-  back to Dooray and keeps only the cookies Dooray issued, in a private file
+  back to Dooray, checks that Dooray now answers as signed in, and keeps only
+  Dooray's SESSION cookie, in a private file
   ($XDG_STATE_HOME/kaist-mail/session.json, or ~/.local/state/kaist-mail).
 
 Remembered login:
@@ -146,7 +148,7 @@ Examples:
   kaist-mail auth login --user 20201234
   kaist-mail --json auth login --code 123456";
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub struct AuthLoginArgs {
     /// KAIST ID or email to sign in as; switches the remembered account.
     #[arg(long, value_name = "ID")]

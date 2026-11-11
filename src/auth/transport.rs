@@ -54,7 +54,7 @@ impl SsoTransport {
     }
 
     pub fn set_document_url(&mut self, url: Url) -> Result<(), AppError> {
-        ensure_allowed(&self.dooray, &self.sso, &url)?;
+        ensure_allowed(&self.dooray, Some(&self.sso), &url)?;
         self.document_url = Some(url);
         Ok(())
     }
@@ -70,12 +70,12 @@ impl SsoTransport {
             .sso
             .join(reference)
             .map_err(|_| AppError::internal("invalid SSO URL"))?;
-        ensure_allowed(&self.dooray, &self.sso, &url)?;
+        ensure_allowed(&self.dooray, Some(&self.sso), &url)?;
         Ok(url)
     }
 
     pub fn get(&mut self, reference: &str) -> Result<(Url, String), AppError> {
-        self.fetch(Method::GET, reference, None, false)
+        self.fetch(Method::GET, reference, None, Mode::Page)
     }
 
     pub fn post(
@@ -83,12 +83,30 @@ impl SsoTransport {
         reference: &str,
         form: &[(&str, &str)],
     ) -> Result<(Url, String), AppError> {
-        self.fetch(Method::POST, reference, Some(form), false)
+        self.fetch(Method::POST, reference, Some(form), Mode::Page)
+    }
+
+    /// POST the SAML assertion to Dooray; this request and its redirects
+    /// may reach only the Dooray origin.
+    pub fn submit_assertion(
+        &mut self,
+        action: &Url,
+        form: &[(&str, &str)],
+    ) -> Result<Url, AppError> {
+        if !self.is_dooray_origin(action) {
+            return Err(AppError::auth_protocol(
+                "the SAML assertion may be sent only to Dooray",
+            ));
+        }
+        let mode = Mode::DoorayOnly;
+        Ok(self
+            .fetch(Method::POST, action.as_str(), Some(form), mode)?
+            .0)
     }
 
     /// An AJAX form POST answered with JSON; its redirects are not followed.
     pub fn ajax(&mut self, reference: &str, form: &[(&str, &str)]) -> Result<Value, AppError> {
-        let (_, body) = self.fetch(Method::POST, reference, Some(form), true)?;
+        let (_, body) = self.fetch(Method::POST, reference, Some(form), Mode::Ajax)?;
         serde_json::from_str(&body)
             .map_err(|_| AppError::auth_protocol("KAIST SSO returned invalid JSON"))
     }
@@ -98,15 +116,16 @@ impl SsoTransport {
         method: Method,
         reference: &str,
         form: Option<&[(&str, &str)]>,
-        ajax: bool,
+        mode: Mode,
     ) -> Result<(Url, String), AppError> {
         let url = self.url(reference)?;
         let payload = form.map(|form| Payload::form(form.iter().copied()));
+        let ajax = mode == Mode::Ajax;
         let mut policy = SsoPolicy {
             cookies: &mut self.cookies,
             document_url: self.document_url.as_ref(),
             dooray: &self.dooray,
-            sso: &self.sso,
+            sso: (mode != Mode::DoorayOnly).then_some(&self.sso),
             ajax,
         };
         // AJAX answers are never redirected: any redirect is a protocol error.
@@ -157,8 +176,19 @@ fn text(response: Response) -> Result<(Url, String), AppError> {
     Ok((url, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-fn ensure_allowed(dooray: &Url, sso: &Url, url: &Url) -> Result<(), AppError> {
-    if url.origin() != dooray.origin() && url.origin() != sso.origin() {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// A page load: redirects within Dooray and SSO are followed.
+    Page,
+    /// An AJAX call: redirects are protocol errors.
+    Ajax,
+    /// The SAML assertion: redirects are followed within Dooray only.
+    DoorayOnly,
+}
+
+/// `sso` is `None` where only Dooray may be reached.
+fn ensure_allowed(dooray: &Url, sso: Option<&Url>, url: &Url) -> Result<(), AppError> {
+    if url.origin() != dooray.origin() && sso.is_none_or(|sso| url.origin() != sso.origin()) {
         return Err(AppError::auth_protocol(
             "sign-in attempted to reach an untrusted origin",
         ));
@@ -175,7 +205,7 @@ struct SsoPolicy<'a> {
     cookies: &'a mut Jar,
     document_url: Option<&'a Url>,
     dooray: &'a Url,
-    sso: &'a Url,
+    sso: Option<&'a Url>,
     ajax: bool,
 }
 
