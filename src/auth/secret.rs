@@ -27,6 +27,8 @@ const NOT_FOUND: i32 = 44; // errSecItemNotFound
 pub struct Keychain {
     pub program: PathBuf,
     timeout: Duration,
+    /// The command's deadline (`--max-seconds`), which every helper run keeps to.
+    deadline: Option<Instant>,
 }
 
 impl Keychain {
@@ -38,6 +40,7 @@ impl Keychain {
         Self {
             program,
             timeout: HELPER_TIMEOUT,
+            deadline: None,
         }
     }
 
@@ -47,6 +50,18 @@ impl Keychain {
             timeout: UNATTENDED_TIMEOUT,
             ..self
         }
+    }
+
+    pub fn until(self, deadline: Option<Instant>) -> Self {
+        Self { deadline, ..self }
+    }
+
+    /// How long the next helper run may take.
+    fn limit(&self) -> Duration {
+        self.deadline.map_or(self.timeout, |deadline| {
+            self.timeout
+                .min(deadline.saturating_duration_since(Instant::now()))
+        })
     }
 
     pub fn available(&self) -> bool {
@@ -91,7 +106,7 @@ impl Keychain {
             &self.program,
             &["-i"],
             Some(command.as_bytes()),
-            self.timeout,
+            self.limit(),
         )?;
         // `security -i` can report command failures only on stderr, so prove
         // the write by reading it back.
@@ -112,7 +127,7 @@ impl Keychain {
 
     pub fn lookup(&self, account: &str) -> Result<Option<Zeroizing<String>>, AppError> {
         let args = ["find-generic-password", "-s", SERVICE, "-a", account, "-w"];
-        let finished = run_helper(&self.program, &args, None, self.timeout)?;
+        let finished = run_helper(&self.program, &args, None, self.limit())?;
         match finished.code {
             Some(0) => finished.secret().map(Some),
             Some(NOT_FOUND) => Ok(None),
@@ -123,7 +138,7 @@ impl Keychain {
     /// Delete the secret; deleting an absent one succeeds.
     pub fn clear(&self, account: &str) -> Result<(), AppError> {
         let args = ["delete-generic-password", "-s", SERVICE, "-a", account];
-        let finished = run_helper(&self.program, &args, None, self.timeout)?;
+        let finished = run_helper(&self.program, &args, None, self.limit())?;
         match finished.code {
             Some(0 | NOT_FOUND) => Ok(()),
             _ => Err(finished.failure("macOS keychain delete")),
@@ -139,7 +154,7 @@ impl Keychain {
                 &self.program,
                 &["delete-generic-password", "-s", SERVICE],
                 None,
-                self.timeout,
+                self.limit(),
             )?;
             match finished.code {
                 Some(0) => removed = true,
@@ -205,8 +220,8 @@ fn run_helper(
             let _ = child.kill();
             let _ = child.wait();
             return Err(AppError::config(format!(
-                "`{name}` did not finish within {} seconds; a locked keychain waits for its unlock dialog",
-                timeout.as_secs()
+                "`{name}` did not finish within {:.1} s; a locked keychain waits for its unlock dialog",
+                timeout.as_secs_f64()
             )));
         }
         thread::sleep(Duration::from_millis(5));

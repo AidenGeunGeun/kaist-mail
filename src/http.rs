@@ -28,6 +28,13 @@ pub fn agent(timeout: Duration, connect_timeout: Option<Duration>) -> Agent {
     Agent::new_with_config(config(timeout).timeout_connect(connect_timeout).build())
 }
 
+/// An [`agent`] for one request that must finish by `deadline`, or `None`
+/// once it has passed.
+pub fn agent_until(timeout: Duration, deadline: Instant) -> Option<Agent> {
+    let timeout = timeout.min(deadline.saturating_duration_since(Instant::now()));
+    (!timeout.is_zero()).then(|| agent(timeout, Some(timeout.min(Duration::from_secs(8)))))
+}
+
 /// An agent for long transfers: `deadline` bounds the whole transfer, and
 /// connecting or waiting for the response headers fails after `stall`.
 /// Stalls inside the body are the reader's to detect.

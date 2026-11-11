@@ -32,7 +32,8 @@ fn renewing(rejects: fn(&Request) -> bool, mail: Route) -> (Server, Server) {
     renewing_after(Duration::ZERO, rejects, mail)
 }
 
-/// As [`renewing`], with KAIST SSO taking `pause` to answer.
+/// As [`renewing`], with each step of the sign-in, Dooray's and KAIST
+/// SSO's, taking `pause` to answer.
 fn renewing_after(pause: Duration, rejects: fn(&Request) -> bool, mail: Route) -> (Server, Server) {
     let (dooray_url, sso_url) = (
         Arc::new(OnceLock::<String>::new()),
@@ -41,6 +42,9 @@ fn renewing_after(pause: Duration, rejects: fn(&Request) -> bool, mail: Route) -
     let sso_for_dooray = sso_url.clone();
     let dooray = Server::new(move |request: &Request| {
         let stale = request.header_value("cookie") == Some("SESSION=stale");
+        if request.target.starts_with("/auth/signin") || request.target.starts_with("/idp/") {
+            std::thread::sleep(pause);
+        }
         match (request.method.as_str(), request.target.split('?').next().unwrap()) {
             ("GET", "/auth/signin") => Response::html(
                 r#"<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"buttons":[{"name":"Students","url":"/idp/login/saml?redirectUrl=%2F"}]}}}</script>"#,
@@ -234,31 +238,32 @@ fn a_rejected_export_saves_the_message_once_with_the_renewed_session() {
 
 #[test]
 fn a_renewal_does_not_outlast_max_seconds_or_retry_after_it() {
-    let mail = |_: &Request| Response::bytes("message/rfc822", RAW);
-    let servers = renewing_after(Duration::from_secs(3), always, Box::new(mail));
-    let home = stale_home(&servers.1);
-    let out = TempDir::new().unwrap();
+    let mail = |request: &Request| match request.target.as_str() {
+        DETAIL_PATH => Response::bytes("application/json;charset=UTF-8", DETAIL),
+        _ => Response::bytes("message/rfc822", RAW),
+    };
+    // Each request of the renewal fits in --max-seconds; all of them do not.
+    let servers = renewing_after(Duration::from_millis(400), always, Box::new(mail));
+    for command in [&["export", ID][..], &["download", ID, "--part", "3"]] {
+        let home = stale_home(&servers.1);
+        let out = TempDir::new().unwrap();
+        let before = count(&servers.0, &format!("/mails/{ID}"));
 
-    let args = [
-        "--json",
-        "export",
-        ID,
-        "--out",
-        out.path().to_str().unwrap(),
-    ];
-    let started = Instant::now();
-    let limits = ["--max-seconds", "1", "--stall-seconds", "1"];
-    let output = home.run_with_sso(
-        Some(&servers.0),
-        Some(&servers.1),
-        &[&args[..], &limits].concat(),
-    );
-    assert!(
-        started.elapsed() < Duration::from_millis(2_500),
-        "{:?}",
-        started.elapsed()
-    );
-    assert_eq!(envelope(&output.stderr)["error"]["code"], "NETWORK_ERROR");
-    assert_eq!(count(&servers.0, &format!("/mails/{ID}")), 1);
-    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+        let limits = ["--max-seconds", "1", "--stall-seconds", "1"];
+        let args = ["--out", out.path().to_str().unwrap()];
+        let started = Instant::now();
+        let output = home.run_with_sso(
+            Some(&servers.0),
+            Some(&servers.1),
+            &[&["--json"], command, &args, &limits].concat(),
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(1_500),
+            "{command:?} took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(envelope(&output.stderr)["error"]["code"], "NETWORK_ERROR");
+        assert_eq!(count(&servers.0, &format!("/mails/{ID}")) - before, 1);
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+    }
 }

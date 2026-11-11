@@ -51,18 +51,13 @@ fn dispatch(cli: &Cli) -> Result<CommandResult, AppError> {
         }
         Command::Download(args) => {
             let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
-            // The detail fetch is the first request, so this keeps it within --max-seconds.
-            let client = Client::new(base, cli.timeout.min(args.transfer.max_seconds))?;
+            let client = Client::new(base, cli.timeout)?.until(Some(limits.deadline));
             download::attachments(&client, &args.id, &args.parts, &args.out, limits)
         }
         Command::Export(args) => {
             let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
-            download::eml(
-                &Client::new(base, cli.timeout)?,
-                &args.id,
-                &args.out,
-                limits,
-            )
+            let client = Client::new(base, cli.timeout)?.until(Some(limits.deadline));
+            download::eml(&client, &args.id, &args.out, limits)
         }
     }
 }

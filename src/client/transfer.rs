@@ -21,7 +21,7 @@ const CHUNK: usize = 64 * 1024;
 /// The time budget shared by every transfer of one command.
 #[derive(Clone, Copy)]
 pub struct Limits {
-    deadline: Instant,
+    pub deadline: Instant,
     stall: Duration,
 }
 

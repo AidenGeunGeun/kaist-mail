@@ -66,6 +66,9 @@ struct State {
     /// answer is cut off mid-body.
     password_pause: AtomicU64,
     password_cut: AtomicBool,
+    /// Milliseconds Dooray takes to answer the folder list a new session is
+    /// checked with.
+    folders_pause: AtomicU64,
 }
 
 impl State {
@@ -130,9 +133,14 @@ fn dooray_route(
                 .header("Set-Cookie", "scoped=x; Path=/idp"),
         },
         ("GET", "/auth/signin/finalize") => Response::html("<script>location.href='/'</script>"),
-        ("GET", "/v2/wapi/mail-folders") if state.accepts(request) => json(
-            r#"{"header":{"isSuccessful":true,"resultCode":0,"resultMessage":""},"result":{"totalCount":0,"contents":[]}}"#,
-        ),
+        ("GET", "/v2/wapi/mail-folders") if state.accepts(request) => {
+            std::thread::sleep(Duration::from_millis(
+                state.folders_pause.load(Ordering::SeqCst),
+            ));
+            json(
+                r#"{"header":{"isSuccessful":true,"resultCode":0,"resultMessage":""},"result":{"totalCount":0,"contents":[]}}"#,
+            )
+        }
         ("GET", "/v2/wapi/mail-folders") => Response::html("").status("401 Unauthorized"),
         (method, path) => panic!("unexpected Dooray request {method} {path}"),
     }
@@ -877,6 +885,52 @@ fn renewal_while_kaist_is_unreachable_keeps_the_password_usable() {
         .unwrap();
     assert_eq!(error.code, "NETWORK_ERROR", "{}", error.message);
     assert_eq!(hold(&fixture), None);
+}
+
+#[test]
+fn every_wait_of_a_renewal_ends_at_the_command_deadline() {
+    let slow_check = Fixture::expired();
+    slow_check
+        .state
+        .folders_pause
+        .store(1_500, Ordering::SeqCst);
+    let locked = Fixture::expired();
+    let _held = store::lock_session(&locked.dirs.session_lock(), Duration::ZERO).unwrap();
+    let hung_keychain = by_password();
+
+    for (case, fixture) in [
+        ("checking the new session", &slow_check),
+        ("waiting for the session lock", &locked),
+        ("reading the password", &hung_keychain),
+    ] {
+        let bin = fixture.root.path().join("bin");
+        let mut keychain =
+            secret::tests::fake_security(&bin, &fixture.root.path().join("keychain"));
+        if case == "reading the password" {
+            keychain.program = secret::tests::script(&bin, "hung-security", "sleep 10");
+        }
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(500);
+        let keychain = keychain.until(Some(deadline));
+        let env = Env {
+            dirs: &fixture.dirs,
+            dooray: &fixture.dooray_url,
+            sso: &fixture.sso_url,
+            timeout: 5,
+            deadline: Some(deadline),
+            keychain: &keychain,
+            interactive: false,
+            code: CodeStep::Refuse,
+            json: true,
+        };
+        let renewed = renew::renew_with(&env, renew::Trigger::Rejected("SESSION=authed"));
+        assert!(renewed.is_err(), "{case}");
+        assert!(
+            started.elapsed() < Duration::from_millis(1_200),
+            "{case} took {:?}",
+            started.elapsed()
+        );
+    }
 }
 
 #[test]

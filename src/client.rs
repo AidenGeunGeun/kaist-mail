@@ -37,6 +37,9 @@ pub struct Client {
     base: Url,
     cookie: Mutex<String>,
     timeout: u64,
+    /// The command's deadline (`--max-seconds`), which every request, a
+    /// renewal included, keeps to.
+    deadline: Option<Instant>,
     /// The cookie is the saved session, which `auth` renews when Dooray rejects it.
     saved: bool,
 }
@@ -97,8 +100,13 @@ impl Client {
             base,
             cookie: Mutex::new(cookie),
             timeout,
+            deadline: None,
             saved: false,
         }
+    }
+
+    pub fn until(self, deadline: Option<Instant>) -> Self {
+        Self { deadline, ..self }
     }
 
     /// GET a wapi path and return its `result`, or the error its `header` reports.
@@ -129,7 +137,15 @@ impl Client {
             .base
             .join(path)
             .map_err(|_| AppError::internal("invalid Dooray API path"))?;
-        let bytes = self.signed(None, |cookie| {
+        let bytes = self.signed(self.deadline, |cookie| {
+            let bounded = match self.deadline {
+                None => None,
+                Some(deadline) => Some(
+                    http::agent_until(Duration::from_secs(self.timeout), deadline).ok_or_else(
+                        || AppError::network("the command ran out of its --max-seconds"),
+                    )?,
+                ),
+            };
             let mut policy = Policy {
                 base: &self.base,
                 cookie,
@@ -142,7 +158,8 @@ impl Client {
                 max_redirects: 3,
                 strict: true,
             };
-            let response = http::follow(&self.agent, request, &mut policy).map_err(failure)?;
+            let agent = bounded.as_ref().unwrap_or(&self.agent);
+            let response = http::follow(agent, request, &mut policy).map_err(failure)?;
             read_body(response)
         })?;
         // The header decides the outcome before the result's type is checked.

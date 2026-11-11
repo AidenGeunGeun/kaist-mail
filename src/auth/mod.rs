@@ -228,7 +228,10 @@ struct Env<'a> {
 impl Env<'_> {
     /// How long to wait for another sign-in, renewal or sign-out.
     fn lock_wait(&self) -> Duration {
-        Duration::from_secs(self.timeout)
+        let wait = Duration::from_secs(self.timeout);
+        self.deadline.map_or(wait, |deadline| {
+            wait.min(deadline.saturating_duration_since(Instant::now()))
+        })
     }
 }
 
@@ -637,6 +640,7 @@ fn adopt(
     session.renewal = renewal.or(session.renewal);
     let header = session.cookie_header(epoch_now()).unwrap_or_default();
     crate::client::Client::with_cookie(env.dooray.clone(), header.clone(), env.timeout)
+        .until(env.deadline)
         .wapi::<serde::de::IgnoredAny>(crate::client::SYSTEM_FOLDERS)
         .map_err(|error| match error.code {
             "AUTH_EXPIRED" => AppError::auth_protocol(

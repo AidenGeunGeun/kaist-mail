@@ -155,14 +155,9 @@ impl SsoTransport {
         // gets only what is left.
         let bounded = match self.deadline {
             None => None,
-            Some(deadline) => match deadline.saturating_duration_since(Instant::now()) {
-                Duration::ZERO => {
-                    return Err(AppError::network(
-                        "sign-in ran out of the command's --max-seconds",
-                    ));
-                }
-                left => Some(agent(left.min(self.timeout))),
-            },
+            Some(deadline) => Some(http::agent_until(self.timeout, deadline).ok_or_else(|| {
+                AppError::network("sign-in ran out of the command's --max-seconds")
+            })?),
         };
         let client = bounded.as_ref().unwrap_or(&self.client);
         let response = http::follow(client, request, &mut policy).map_err(failure)?;

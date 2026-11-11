@@ -140,16 +140,13 @@ fn with_env<T>(
 ) -> Result<T, AppError> {
     let dirs = Dirs::from_env()?;
     let sso = sso_url(base_url)?;
-    // Each wait (the lock, the check of a new session) fits in what is left.
-    let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-    let timeout = left.map_or(timeout, |left| timeout.min(left.as_secs() + 1));
     run(&Env {
         dirs: &dirs,
         dooray: base_url,
         sso: &sso,
         timeout,
         deadline,
-        keychain: &Keychain::system().unattended(),
+        keychain: &Keychain::system().unattended().until(deadline),
         interactive: false,
         code: CodeStep::Refuse,
         json: true,
