@@ -249,6 +249,7 @@ fn walk(home: &Home, server: &Server, args: &[&str]) -> (Vec<String>, Value) {
     while let Some(next) = cursor {
         let (more, meta) = page(home, server, args, Some(&next));
         assert!(!more.is_empty() || meta["next_cursor"].is_null(), "{meta}");
+        assert!(more.iter().all(|id| !ids.contains(id)), "repeated rows");
         ids.extend(more);
         cursor = meta["next_cursor"].as_str().map(str::to_owned);
     }
