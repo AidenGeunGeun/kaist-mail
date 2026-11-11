@@ -2,7 +2,7 @@
 //! private files.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::{
     client::{Client, Limits, Size},
     error::AppError,
-    message::{self, Attachment, MailId},
+    mail::{self, Attachment, MailId},
     output::{self, CommandResult},
     private_fs,
 };
@@ -47,9 +47,9 @@ pub fn attachments(
     limits: Limits,
 ) -> Result<CommandResult, AppError> {
     if !out.is_dir() {
-        check_free(out)?;
+        check_free(out, &out.display().to_string())?;
     }
-    let detail = message::fetch(client, id)?;
+    let detail = mail::fetch(client, id)?;
     let mut warnings = Vec::new();
     let mut chosen: Vec<&Attachment> = Vec::new();
     for part in parts {
@@ -81,12 +81,17 @@ pub fn attachments(
             "message {id} has no attachments to download"
         )));
     }
-    let destinations = match out.is_dir() {
+    // Errors name the part and the user's --out, never Dooray's file name.
+    let shown = out.display();
+    let targets: Vec<(&Attachment, PathBuf, String)> = match out.is_dir() {
         true => chosen
             .iter()
-            .map(|file| out.join(file_name(&file.name, file.part)))
-            .collect::<Vec<_>>(),
-        false if chosen.len() == 1 => vec![out.to_path_buf()],
+            .map(|file| {
+                let path = out.join(file_name(&file.name, file.part));
+                (*file, path, format!("part {} in {shown}", file.part))
+            })
+            .collect(),
+        false if chosen.len() == 1 => vec![(chosen[0], out.to_path_buf(), shown.to_string())],
         false => {
             return Err(AppError::usage(format!(
                 "--out must be an existing directory for {} attachments",
@@ -94,19 +99,23 @@ pub fn attachments(
             )));
         }
     };
-    let mut seen = HashSet::new();
-    for path in &destinations {
-        if !seen.insert(path) {
+    let mut seen = HashMap::new();
+    for (file, path, label) in &targets {
+        let key = path
+            .file_name()
+            .map(|name| same_file_key(&name.to_string_lossy()));
+        if let Some(earlier) = seen.insert(key, file.part) {
             return Err(AppError::usage(format!(
-                "two attachments would both be saved as {}; download them one at a time with --part and --out FILE",
-                path.display()
-            )));
+                "parts {earlier} and {} would get the same file name in {shown}",
+                file.part
+            ))
+            .with_hint("save them one at a time with --part and --out FILE"));
         }
-        check_free(path)?;
+        check_free(path, label)?;
     }
     let mut files = Vec::new();
-    for (file, path) in chosen.iter().zip(&destinations) {
-        let saved = private_fs::publish_new(path, |out| {
+    for (file, path, label) in &targets {
+        let saved = private_fs::publish_new(path, label, |out| {
             client.download(&file.download_url, Size::Exact(file.size), limits, out)
         });
         let (bytes, published) = match saved {
@@ -159,8 +168,9 @@ pub fn eml(
         true => out.join(format!("{id}.eml")),
         false => out.to_path_buf(),
     };
-    check_free(&path)?;
-    let (bytes, warnings) = private_fs::publish_new(&path, |file| {
+    let label = path.display().to_string();
+    check_free(&path, &label)?;
+    let (bytes, warnings) = private_fs::publish_new(&path, &label, |file| {
         client.download(
             &format!("/v2/wapi/mails/{id}?type=raw"),
             Size::AtMost(MAX_EML),
@@ -179,24 +189,29 @@ pub fn eml(
     Ok(result)
 }
 
-/// Fails before any download when `path` is taken; publication checks again.
-fn check_free(path: &Path) -> Result<(), AppError> {
+/// Fails before any download when `path`, shown as `label`, is taken;
+/// publication checks again.
+fn check_free(path: &Path, label: &str) -> Result<(), AppError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(AppError::config(format!(
-            "{} already exists; kaist-mail never overwrites",
-            path.display()
-        ))),
+        Ok(_) => Err(private_fs::exists(label)),
         Err(_) => Ok(()),
     }
+}
+
+/// Names a case-insensitive, normalization-insensitive filesystem (APFS,
+/// HFS+, NTFS) stores as one file share a key.
+fn same_file_key(name: &str) -> String {
+    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
+    nfc.normalize(&name.to_lowercase()).into_owned()
 }
 
 fn with_saved(error: AppError, files: &[Saved]) -> AppError {
     if files.is_empty() {
         return error;
     }
-    let saved: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+    let saved: Vec<u32> = files.iter().map(|file| file.part).collect();
     let mut details = error.details.clone().unwrap_or_else(|| json!({}));
-    details["saved"] = json!(saved);
+    details["saved_parts"] = json!(saved);
     error.with_details(details)
 }
 

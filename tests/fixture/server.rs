@@ -99,6 +99,11 @@ impl Response {
         self
     }
 
+    pub fn content_type(mut self, content_type: &'static str) -> Self {
+        self.content_type = content_type;
+        self
+    }
+
     pub fn status(mut self, status: &'static str) -> Self {
         self.status = status;
         self

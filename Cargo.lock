@@ -580,6 +580,7 @@ dependencies = [
  "cbc",
  "clap",
  "html2text",
+ "icu_normalizer",
  "kisaseed",
  "rpassword",
  "rustls",

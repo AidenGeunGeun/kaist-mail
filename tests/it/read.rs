@@ -151,7 +151,17 @@ fn download_saves_korean_named_private_files_and_never_overwrites() {
     );
 
     let again = home.run(Some(&server), &["--json", "download", ID, "--out", dir]);
-    assert_eq!(envelope(&again.stderr)["error"]["code"], "CONFIG_ERROR");
+    let error = &envelope(&again.stderr)["error"];
+    assert_eq!(error["code"], "CONFIG_ERROR");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("part 3") && message.contains(dir),
+        "{message}"
+    );
+    assert!(
+        !message.contains(PDF_NAME),
+        "the server's file name stays out of errors"
+    );
     assert_eq!(fs::read(&pdf).unwrap(), file_bytes(152_031, 1));
     let names: Vec<_> = fs::read_dir(out.path())
         .unwrap()
@@ -185,7 +195,7 @@ fn download_saves_korean_named_private_files_and_never_overwrites() {
 }
 
 #[test]
-fn transfers_stream_past_the_json_limit_and_never_publish_a_short_file() {
+fn transfers_stream_past_the_json_limit_even_for_json_files_and_never_publish_a_short_file() {
     let home = Home::new(Some(&live()));
     let out = TempDir::new().unwrap();
     let large = file_bytes(9 * 1024 * 1024 + 1, 3);
@@ -193,7 +203,7 @@ fn transfers_stream_past_the_json_limit_and_never_publish_a_short_file() {
     let detail = DETAIL.replace(r#""size": 152031"#, &format!(r#""size": {}"#, large.len()));
     let server = Server::new(move |request: &Request| match request.target.as_str() {
         DETAIL_PATH => Response::bytes("application/json", detail.clone()),
-        PDF_PATH => Response::bytes("application/pdf", served.clone()),
+        PDF_PATH => Response::open_ended(served.clone()).content_type("application/json"),
         DOCX_PATH => Response::open_ended(vec![0; 100]),
         other => panic!("unexpected request {other}"),
     });
@@ -215,6 +225,27 @@ fn transfers_stream_past_the_json_limit_and_never_publish_a_short_file() {
         1,
         "no partial or temporary file"
     );
+}
+
+#[test]
+fn names_the_filesystem_treats_as_one_fail_before_any_download() {
+    let home = Home::new(Some(&live()));
+    let out = TempDir::new().unwrap();
+    let dir = out.path().to_str().unwrap();
+    for (first, second) in [("가.txt", "\u{1100}\u{1161}.txt"), ("A.txt", "a.txt")] {
+        let detail = DETAIL
+            .replace(&format!(r#""{PDF_NAME}""#), &format!(r#""{first}""#))
+            .replace(
+                r#""Course registration guide (EN).docx""#,
+                &format!(r#""{second}""#),
+            );
+        let server = mailbox(detail);
+        let output = home.run(Some(&server), &["--json", "download", ID, "--out", dir]);
+        let error = &envelope(&output.stderr)["error"];
+        assert_eq!(error["code"], "USAGE", "{first} and {second}");
+        assert_eq!(server.requests().len(), 1, "only the detail was fetched");
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+    }
 }
 
 #[test]

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::message::MailId;
+use crate::mail::MailId;
 
 const TOP_HELP: &str = "Workflow:
   kaist-mail auth login                 # interactive; passwords are never flags
@@ -26,8 +26,8 @@ Exit codes:
   11 AUTH_PROTOCOL_CHANGED   12 CODE_REQUIRED (resume: `auth login --code`)
   13 PERMISSION_DENIED       20 NETWORK_ERROR (retryable)
   21 HTTP_ERROR              30 UPSTREAM_SHAPE_CHANGED
-  31 UPSTREAM_ERROR (details: result_code, and result_message: Dooray's localized
-     reason, untrusted text cut to 200 characters)
+  31 UPSTREAM_ERROR (details: result_code, Dooray's integer code; the message
+     names known codes. Dooray's own text is never shown: it may quote mail)
   40 CONFIG_ERROR            41 LIMIT_EXCEEDED
   44 NOT_FOUND               50 INTERNAL_ERROR
 
@@ -106,7 +106,7 @@ pub enum Command {
     Export(ExportArgs),
 }
 
-const TRANSFER_HELP_DOWNLOAD: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long. Each file must be exactly the size Dooray lists.\n\nJSON data: {id, marked_read, files: [{part, path, bytes}]}; path is absolute. If a later file fails, error.details.saved lists the files already saved.\n\nExamples:\n  kaist-mail download 4237456781234567890 --out ~/Downloads\n  kaist-mail --json download 4237456781234567890 --part 3 --out notice.pdf";
+const TRANSFER_HELP_DOWNLOAD: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long. Each file must be exactly the size Dooray lists.\n\nJSON data: {id, marked_read, files: [{part, path, bytes}]}; path is absolute. If a later file fails, error.details.saved_parts lists the parts already saved. Errors name parts and --out, never Dooray's file names.\n\nExamples:\n  kaist-mail download 4237456781234567890 --out ~/Downloads\n  kaist-mail --json download 4237456781234567890 --part 3 --out notice.pdf";
 
 const TRANSFER_HELP_EXPORT: &str = "Transfers stream to disk: --max-seconds bounds the whole command and --stall-seconds fails a connection that sends nothing for that long.\n\nJSON data: {id, path, bytes}; path is absolute.\n\nExamples:\n  kaist-mail export 4237456781234567890 --out ~/mail\n  kaist-mail --json export 4237456781234567890 --out notice.eml";
 

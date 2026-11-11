@@ -3,13 +3,13 @@
 
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
 
-use super::{Client, Policy, check_header, failure, read_body, shape_error};
+use super::{Client, MAX_BODY, Policy, check_header, failure, shape_error};
 use crate::{
     error::AppError,
     http::{self, Follow, Method, Response},
@@ -86,39 +86,53 @@ impl Client {
             Size::Exact(bytes) => (Some(bytes), bytes),
             Size::AtMost(bytes) => (None, bytes),
         };
+        // Dooray reports a failed file request as a wapi envelope, whose
+        // size need not match; a JSON file of the listed size is the file.
         let json = response
             .header("content-type")
             .is_some_and(|kind| kind.to_ascii_lowercase().contains("json"));
-        // Dooray reports a failed file request as a wapi envelope; a JSON
-        // attachment of exactly the listed size is the file itself.
-        if json && (exact.is_none() || declared != exact) {
-            check_header(&path, &read_body(response)?)?;
-            return Err(shape_error(&path, "JSON instead of the file"));
-        }
+        let limit = if json { max.max(MAX_BODY) } else { max };
         match (exact, declared) {
-            (Some(expected), Some(declared)) if declared != expected => {
+            (Some(expected), Some(declared)) if declared != expected && !json => {
                 return Err(shape_error(
                     &path,
                     &format!("{declared} bytes for a file Dooray lists as {expected} bytes"),
                 ));
             }
-            (_, Some(declared)) if declared > max => {
+            (_, Some(declared)) if declared > limit => {
                 return Err(AppError::limit(format!(
-                    "Dooray {path} is larger than {max} bytes"
+                    "Dooray {path} is larger than {limit} bytes"
                 )));
             }
             _ => {}
         }
-        let written = copy(response, file, max, limits)?;
-        if declared
-            .or(exact)
-            .is_some_and(|expected| expected != written)
-        {
-            return Err(AppError::network(format!(
-                "Dooray {path} ended after {written} bytes"
-            )));
+        let written = copy(response, file, limit, limits)?;
+        let ended_early =
+            || AppError::network(format!("Dooray {path} ended after {written} bytes"));
+        if declared.is_some_and(|declared| declared != written) {
+            return Err(ended_early());
         }
-        Ok(written)
+        match exact {
+            Some(expected) if written == expected => Ok(written),
+            _ if json => Err(envelope_error(&path, file)),
+            Some(_) => Err(ended_early()),
+            None => Ok(written),
+        }
+    }
+}
+
+/// The error the wapi envelope just written to `file` reports.
+fn envelope_error(path: &str, file: &mut File) -> AppError {
+    let mut bytes = Vec::new();
+    let read = file
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| file.take(MAX_BODY).read_to_end(&mut bytes));
+    if let Err(error) = read {
+        return AppError::config(format!("could not read the download back: {error}"));
+    }
+    match check_header(path, &bytes) {
+        Err(error) => error,
+        Ok(()) => shape_error(path, "JSON instead of the file"),
     }
 }
 

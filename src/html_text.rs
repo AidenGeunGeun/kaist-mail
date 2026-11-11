@@ -22,10 +22,7 @@ pub fn to_text(html: &str) -> Result<String, AppError> {
         let mut rendered = String::new();
         let mut span = Span::default();
         for segment in line.tagged_strings() {
-            let mut next = Span {
-                start: rendered.len(),
-                ..Span::default()
-            };
+            let mut next = Span::default();
             for annotation in &segment.tag {
                 match annotation {
                     RichAnnotation::Link(url) => next.link = Some(url),
@@ -35,7 +32,10 @@ pub fn to_text(html: &str) -> Result<String, AppError> {
             }
             if (next.link, next.image) != (span.link, span.image) {
                 span.close(&mut rendered);
-                span = next;
+                span = Span {
+                    start: rendered.len(),
+                    ..next
+                };
             }
             rendered.push_str(&segment.s);
         }
@@ -71,6 +71,28 @@ impl Span<'_> {
             rendered.push_str(" <");
             rendered.push_str(url);
             rendered.push('>');
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_text;
+
+    #[test]
+    fn an_image_or_link_may_follow_any_span_on_a_line() {
+        for (html, text) in [
+            (r#"<p><img alt="가" src="x"> suffix</p>"#, "[가] suffix"),
+            (
+                r#"<p><a href="https://a.test">A</a><img alt="그림" src="x"> 끝</p>"#,
+                "A <https://a.test>[그림] 끝",
+            ),
+            (
+                r#"<p>앞 <img alt="그림" src="x"><a href="https://a.test">링크</a></p>"#,
+                "앞 [그림]링크 <https://a.test>",
+            ),
+        ] {
+            assert_eq!(to_text(html).unwrap(), text, "{html}");
         }
     }
 }

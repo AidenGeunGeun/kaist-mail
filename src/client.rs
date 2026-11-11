@@ -14,7 +14,6 @@ use crate::{
     auth,
     error::AppError,
     http::{self, Failure, Follow, Method, Response},
-    output,
     url::{Url, is_http_loopback},
 };
 
@@ -49,8 +48,6 @@ struct Header {
     is_successful: bool,
     #[serde(default)]
     result_code: i64,
-    #[serde(default)]
-    result_message: String,
 }
 
 /// Accept only the production origin or a loopback fixture.
@@ -130,31 +127,30 @@ fn decode_error(path: &str, error: &serde_json::Error) -> AppError {
     shape_error(path, &crate::error::json_problem(error))
 }
 
-/// The error a wapi envelope's `header` reports, if any.
+/// The error a wapi envelope's `header` reports, if any. Only the code is
+/// reported: `resultMessage` is localized server text that can quote mail
+/// or request data.
 fn check_header(path: &str, bytes: &[u8]) -> Result<(), AppError> {
     let envelope: Envelope<Header, IgnoredAny> =
         serde_json::from_slice(bytes).map_err(|error| decode_error(path, &error))?;
     let Header {
         is_successful,
         result_code,
-        result_message,
     } = envelope.header;
     if is_successful {
         return Ok(());
     }
-    // Logic keys on resultCode. resultMessage is Dooray's localized reason
-    // for the user, kept only in details, bounded and stripped of control
-    // characters because it is untrusted server text.
-    let reason: String = output::sanitize_terminal(&result_message)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(200)
-        .collect();
+    let meaning = match result_code {
+        -100207 => "the message was deleted or recalled, or is not in this mailbox",
+        -200200 => "Dooray rejected the request as invalid",
+        -200100 => "the request named no messages",
+        -100300 => "Dooray had a server error",
+        -13207002 => "the search keyword is too long",
+        _ => "Dooray refused the request",
+    };
     Err(
-        AppError::upstream(format!("Dooray reported error {result_code} for {path}"))
-            .with_details(json!({"result_code": result_code, "result_message": reason})),
+        AppError::upstream(format!("{meaning} (error {result_code} for {path})"))
+            .with_details(json!({"result_code": result_code})),
     )
 }
 

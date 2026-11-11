@@ -33,27 +33,31 @@ const TEMPORARY_SUFFIX: &str = ".part";
 /// Longer than any transfer may run (`--max-seconds` stops at a day).
 const STALE_AFTER: Duration = Duration::from_secs(48 * 60 * 60);
 
+/// The error for a destination, shown as `label`, that is already taken.
+pub(crate) fn exists(label: &str) -> AppError {
+    AppError::config(format!(
+        "{label} already exists; kaist-mail never overwrites"
+    ))
+}
+
 /// Creates `destination` as a new 0600 file and never replaces an existing
-/// one. `fill` writes a hidden temporary beside it, which is hard-linked into
-/// place, or copied where the filesystem has no hard links, so a failed or
-/// interrupted transfer never leaves a partial file under the real name.
-/// Returns `fill`'s value and warnings for the user.
+/// one; messages show it as `label`. `fill` writes, and may read back, a
+/// hidden temporary beside it, which is hard-linked into place, or copied
+/// where the filesystem has no hard links, so a failed or interrupted
+/// transfer never leaves a partial file under the real name. Returns
+/// `fill`'s value and warnings for the user.
 pub(crate) fn publish_new<T>(
     destination: &Path,
+    label: &str,
     fill: impl FnOnce(&mut File) -> Result<T, AppError>,
 ) -> Result<(T, Vec<String>), AppError> {
-    let shown = destination.display();
-    let exists = || {
-        AppError::config(format!(
-            "{shown} already exists; kaist-mail never overwrites"
-        ))
-    };
     let parent = match destination.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
     let temporary = parent.join(temporary_name());
     let mut file = private_file_options()
+        .read(true)
         .create_new(true)
         .open(&temporary)
         .map_err(|error| {
@@ -68,7 +72,7 @@ pub(crate) fn publish_new<T>(
     let filled = fill(&mut file).and_then(|value| {
         file.sync_all()
             .map(|()| value)
-            .map_err(|error| AppError::config(format!("cannot write {shown}: {error}")))
+            .map_err(|error| AppError::config(format!("cannot write {label}: {error}")))
     });
     drop(file);
     let value = match filled {
@@ -81,16 +85,16 @@ pub(crate) fn publish_new<T>(
     let mut warnings = Vec::new();
     let published = match fs::hard_link(&temporary, destination) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(exists()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(exists(label)),
         Err(_) => match copy_new(&temporary, destination) {
-            Ok(true) => Err(exists()),
+            Ok(true) => Err(exists(label)),
             Ok(false) => {
                 warnings.push(format!(
-                    "{shown} was copied into place because its filesystem has no hard links"
+                    "{label} was copied into place because its filesystem has no hard links"
                 ));
                 Ok(())
             }
-            Err(error) => Err(AppError::config(format!("cannot create {shown}: {error}"))),
+            Err(error) => Err(AppError::config(format!("cannot create {label}: {error}"))),
         },
     };
     if let Err(error) = fs::remove_file(&temporary) {

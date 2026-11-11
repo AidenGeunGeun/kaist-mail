@@ -10,7 +10,7 @@ mod error;
 mod fixture_server;
 mod html_text;
 mod http;
-mod message;
+mod mail;
 mod output;
 mod private_fs;
 mod url;
@@ -56,6 +56,18 @@ fn main() -> ExitCode {
     let json = std::env::args_os()
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json");
+    // A panic message can quote the data being processed, such as mail.
+    std::panic::set_hook(Box::new(move |panic| {
+        let mut error = AppError::internal(
+            "kaist-mail hit a bug; its details are withheld because they may quote mail",
+        );
+        if let Some(at) = panic.location() {
+            error = error
+                .with_details(serde_json::json!({"at": format!("{}:{}", at.file(), at.line())}));
+        }
+        output::print_error(&error, json);
+        std::process::exit(error.exit_code().into());
+    }));
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => return report_parse_error(error, json),

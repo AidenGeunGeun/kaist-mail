@@ -175,10 +175,10 @@ fn dooray_errors_report_their_code_whatever_the_result_and_message_language() {
         assert_eq!(output.status.code(), Some(31), "{message}");
         let error = &envelope(&output.stderr)["error"];
         assert_eq!(error["code"], "UPSTREAM_ERROR");
-        assert_eq!(
-            error["details"],
-            serde_json::json!({"result_code": code, "result_message": message})
-        );
+        assert_eq!(error["details"], serde_json::json!({"result_code": code}));
+        if !message.is_empty() {
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(message));
+        }
     }
 }
 
@@ -194,17 +194,11 @@ fn errors_never_echo_mail_data_server_text_or_rejected_secrets() {
         let server =
             Server::new(move |_: &Request| Response::bytes("application/json", body.clone()));
         let output = Home::new(Some(&live())).run(Some(&server), &["--json", "folders"]);
-        let error = &envelope(&output.stderr)["error"];
+        let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
-            !error["message"].as_str().unwrap().contains(canary),
-            "{error}"
+            !stderr.contains(canary) && !stderr.contains('\u{1b}'),
+            "{stderr}"
         );
-        if let Some(message) = error["details"]["result_message"].as_str() {
-            assert!(
-                message.chars().count() <= 200 && !message.contains('\u{1b}'),
-                "{message}"
-            );
-        }
     }
 
     let output = Home::new(None).run(

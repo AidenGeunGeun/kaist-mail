@@ -6,7 +6,7 @@ use crate::{
     client::{Client, Limits, SYSTEM_FOLDERS, USER_FOLDERS, validate_base_url},
     download,
     error::AppError,
-    message,
+    mail,
     output::{self, CommandResult, ListMeta},
 };
 
@@ -32,16 +32,17 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
         }
         Command::Folders => folders(&Client::new(base, cli.timeout)?),
         Command::Read(args) => {
-            let options = message::ReadOptions {
+            let options = mail::ReadOptions {
                 offset: args.offset,
                 max_chars: args.max_chars,
                 recipients: args.recipients,
             };
-            message::read(&Client::new(base, cli.timeout)?, &args.id, &options)
+            mail::read(&Client::new(base, cli.timeout)?, &args.id, &options)
         }
         Command::Download(args) => {
             let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
-            let client = Client::new(base, cli.timeout)?;
+            // The detail fetch is the first request, so this keeps it within --max-seconds.
+            let client = Client::new(base, cli.timeout.min(args.transfer.max_seconds))?;
             download::attachments(&client, &args.id, &args.parts, &args.out, limits)
         }
         Command::Export(args) => {
