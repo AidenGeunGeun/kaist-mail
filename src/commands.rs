@@ -29,7 +29,7 @@ fn dispatch(cli: &Cli) -> Result<CommandResult, AppError> {
             };
             auth::login(&base, cli.timeout, &options, cli.json)
         }
-        Command::Auth(AuthCommand::Logout) => auth::logout(),
+        Command::Auth(AuthCommand::Logout) => auth::logout(cli.timeout),
         Command::Auth(AuthCommand::Forget) => auth::forget(),
         Command::Auth(AuthCommand::Status) => {
             let status = auth::load(&base)?.status;

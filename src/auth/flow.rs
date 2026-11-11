@@ -233,6 +233,9 @@ pub enum CodeStep {
 pub enum Outcome {
     Complete(CompletedLogin),
     CodeRequired(PendingLogin),
+    /// KAIST asked for a second factor and, under [`CodeStep::Refuse`],
+    /// none was requested.
+    CodeDeclined,
 }
 
 /// Everything one login attempt needs besides its prompt.
@@ -304,10 +307,11 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
             Next::Link => link(&mut transport)?,
             Next::Device => register_device(&mut transport)?,
             Next::SecondFactor if code == CodeStep::Refuse => {
-                return Err(AppError::auth_expired(
-                    "KAIST asked for a verification code, so it does not trust this device for password login",
-                )
-                .with_hint("Sign in once from a terminal with `kaist-mail auth login --method password --remember-password` and enter the code; once KAIST registers this device, renewals skip the code."));
+                return Ok(Begun {
+                    outcome: Outcome::CodeDeclined,
+                    username,
+                    password: Some(password),
+                });
             }
             Next::SecondFactor => {
                 let defer = code == CodeStep::Defer;

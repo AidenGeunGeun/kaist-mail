@@ -16,6 +16,9 @@ use crate::error::AppError;
 
 const SERVICE: &str = "kaist-mail";
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+/// `security` has no switch to refuse user interaction: on a locked keychain
+/// it waits for the unlock dialog. Nobody may be there to answer it.
+const UNATTENDED_TIMEOUT: Duration = Duration::from_secs(5);
 /// Keeps a `security -i` command line far below its 4096-byte limit.
 const MAX_SECRET: usize = 1024;
 const NOT_FOUND: i32 = 44; // errSecItemNotFound
@@ -23,12 +26,26 @@ const NOT_FOUND: i32 = 44; // errSecItemNotFound
 /// The keychain behind one `security` program. Tests point it at a fake.
 pub struct Keychain {
     pub program: PathBuf,
+    timeout: Duration,
 }
 
 impl Keychain {
     pub fn system() -> Self {
+        Self::new("/usr/bin/security".into())
+    }
+
+    fn new(program: PathBuf) -> Self {
         Self {
-            program: "/usr/bin/security".into(),
+            program,
+            timeout: HELPER_TIMEOUT,
+        }
+    }
+
+    /// For use without a user: give up on a keychain dialog quickly.
+    pub fn unattended(self) -> Self {
+        Self {
+            timeout: UNATTENDED_TIMEOUT,
+            ..self
         }
     }
 
@@ -70,7 +87,12 @@ impl Keychain {
         command.push_str(" -w ");
         push_quoted(&mut command, secret);
         command.push('\n');
-        let finished = run_helper(&self.program, &["-i"], Some(command.as_bytes()))?;
+        let finished = run_helper(
+            &self.program,
+            &["-i"],
+            Some(command.as_bytes()),
+            self.timeout,
+        )?;
         // `security -i` can report command failures only on stderr, so prove
         // the write by reading it back.
         let stored = self.lookup(account);
@@ -90,7 +112,7 @@ impl Keychain {
 
     pub fn lookup(&self, account: &str) -> Result<Option<Zeroizing<String>>, AppError> {
         let args = ["find-generic-password", "-s", SERVICE, "-a", account, "-w"];
-        let finished = run_helper(&self.program, &args, None)?;
+        let finished = run_helper(&self.program, &args, None, self.timeout)?;
         match finished.code {
             Some(0) => finished.secret().map(Some),
             Some(NOT_FOUND) => Ok(None),
@@ -101,7 +123,7 @@ impl Keychain {
     /// Delete the secret; deleting an absent one succeeds.
     pub fn clear(&self, account: &str) -> Result<(), AppError> {
         let args = ["delete-generic-password", "-s", SERVICE, "-a", account];
-        let finished = run_helper(&self.program, &args, None)?;
+        let finished = run_helper(&self.program, &args, None, self.timeout)?;
         match finished.code {
             Some(0 | NOT_FOUND) => Ok(()),
             _ => Err(finished.failure("macOS keychain delete")),
@@ -117,6 +139,7 @@ impl Keychain {
                 &self.program,
                 &["delete-generic-password", "-s", SERVICE],
                 None,
+                self.timeout,
             )?;
             match finished.code {
                 Some(0) => removed = true,
@@ -137,7 +160,12 @@ struct Finished {
 }
 
 /// Run a helper with `stdin` (never argv or env), capped output and a hard timeout.
-fn run_helper(program: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Finished, AppError> {
+fn run_helper(
+    program: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<Finished, AppError> {
     let name = program.file_name().unwrap_or_default().to_string_lossy();
     let mut child = Command::new(program)
         .args(args)
@@ -165,7 +193,7 @@ fn run_helper(program: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Fin
     };
     let out = drain(child.stdout.take().map(|p| Box::new(p) as _), 1 << 20);
     let err = drain(child.stderr.take().map(|p| Box::new(p) as _), 1 << 16);
-    let deadline = Instant::now() + HELPER_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child
             .try_wait()
@@ -177,8 +205,8 @@ fn run_helper(program: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Fin
             let _ = child.kill();
             let _ = child.wait();
             return Err(AppError::config(format!(
-                "`{name}` did not finish within {} seconds",
-                HELPER_TIMEOUT.as_secs()
+                "`{name}` did not finish within {} seconds; a locked keychain waits for its unlock dialog",
+                timeout.as_secs()
             )));
         }
         thread::sleep(Duration::from_millis(5));
@@ -242,12 +270,13 @@ case "$1" in
   -i) IFS= read -r line; printf '%s\n' "$line" > "{s}/stdin.log"
       printf '%s' "$line" | sed 's/.* -w "\(.*\)"$/\1/' | sed 's/\\\(.\)/\1/g' > "{s}/secret" ;;
   find-generic-password) if [ -f "{s}/secret" ]; then cat "{s}/secret"; echo; else echo "not found" >&2; exit 44; fi ;;
-  delete-generic-password) if [ -f "{s}/secret" ]; then rm "{s}/secret"; else exit 44; fi ;;
+  delete-generic-password) if [ -f "{s}/fail-delete" ]; then echo "denied" >&2; exit 1; fi
+      if [ -f "{s}/secret" ]; then rm "{s}/secret"; else exit 44; fi ;;
 esac"#,
                 s = store.display()
             ),
         );
-        Keychain { program }
+        Keychain::new(program)
     }
 
     #[test]
@@ -286,7 +315,7 @@ esac"#,
                 s = store.path().display()
             ),
         );
-        let error = Keychain { program }.store("student", "pw").unwrap_err();
+        let error = Keychain::new(program).store("student", "pw").unwrap_err();
         assert_eq!(
             error.message,
             "the macOS keychain did not accept the password"

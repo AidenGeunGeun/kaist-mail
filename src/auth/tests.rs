@@ -6,7 +6,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -60,6 +60,8 @@ struct State {
     /// KAIST SSO completed a sign-in on its `JSESSIONID=sso` session and
     /// still honours it.
     sso_alive: AtomicBool,
+    /// Milliseconds KAIST SSO takes to answer a SAML request.
+    sso_pause: AtomicU64,
 }
 
 impl State {
@@ -153,45 +155,55 @@ fn sso_route(
             ))
         }
     };
-    move |request| match path(&request.target) {
-        "/auth/kaist/user/saml/login/link/redirect"
-            if request.target.contains("SAMLRequest")
-                && state.sso_alive.load(Ordering::SeqCst)
-                && request
-                    .header_value("cookie")
-                    .is_some_and(|c| c.contains("JSESSIONID=sso")) =>
-        {
-            saml_form()
+    move |request| {
+        if request.target.contains("SAMLRequest") {
+            let pause = state.sso_pause.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(pause));
         }
-        "/auth/kaist/user/saml/login/link/redirect" if request.target.contains("SAMLRequest") => {
-            redirect("/auth/kaist/user/login/view")
-                .header("Set-Cookie", "JSESSIONID=sso; Path=/auth; HttpOnly")
+        match path(&request.target) {
+            "/auth/kaist/user/saml/login/link/redirect"
+                if request.target.contains("SAMLRequest")
+                    && state.sso_alive.load(Ordering::SeqCst)
+                    && request
+                        .header_value("cookie")
+                        .is_some_and(|c| c.contains("JSESSIONID=sso")) =>
+            {
+                saml_form()
+            }
+            "/auth/kaist/user/saml/login/link/redirect"
+                if request.target.contains("SAMLRequest") =>
+            {
+                redirect("/auth/kaist/user/login/view")
+                    .header("Set-Cookie", "JSESSIONID=sso; Path=/auth; HttpOnly")
+            }
+            "/auth/kaist/user/login/view" => Response::html(format!(
+                r#"<form><input type="hidden" id="agt_id" name="agt_id" value="{agent}"></form>"#
+            )),
+            "/auth/kaist/user/saml/login/link/redirect" if variant == Variant::GetForm => {
+                Response::html(format!(
+                    r#"<form action="{}auth/signin/finalize"><input type="hidden" name="notSAMLResponse" value="x"></form>"#,
+                    dooray.get().unwrap(),
+                ))
+            }
+            "/auth/kaist/user/saml/login/link/redirect" => {
+                state.sso_alive.store(true, Ordering::SeqCst);
+                saml_form()
+            }
+            "/auth/user/login/init" => json(&format!(r#"{{"result_data":"{}"}}"#, "00".repeat(48))),
+            "/auth/user/login/auth" => json(&password_result.lock().unwrap()),
+            "/auth/kaist/user/login/second/view" | "/auth/twofactor/mfa/login2Factor" => {
+                Response::html(r#"<div class="auth_number"><div class="sr-only">42</div></div>"#)
+            }
+            "/auth/kaist/user/login/second/ajaxSendMail" => json(r#"{"errorCode":"SS0001"}"#),
+            "/auth/kaist/user/login/second/ajaxValidCrtfcNo" => json(r#"{"result_code":"SS0001"}"#),
+            "/auth/twofactor/mfa/init" | "/auth/twofactor/mfa/auth" => {
+                json(r#"{"errorCode":"SS0001"}"#)
+            }
+            "/auth/kaist/user/login/check/policy" => json(r#"{"result":true}"#),
+            other => {
+                Response::html(format!("unexpected SSO request {other}")).status("404 Not Found")
+            }
         }
-        "/auth/kaist/user/login/view" => Response::html(format!(
-            r#"<form><input type="hidden" id="agt_id" name="agt_id" value="{agent}"></form>"#
-        )),
-        "/auth/kaist/user/saml/login/link/redirect" if variant == Variant::GetForm => {
-            Response::html(format!(
-                r#"<form action="{}auth/signin/finalize"><input type="hidden" name="notSAMLResponse" value="x"></form>"#,
-                dooray.get().unwrap(),
-            ))
-        }
-        "/auth/kaist/user/saml/login/link/redirect" => {
-            state.sso_alive.store(true, Ordering::SeqCst);
-            saml_form()
-        }
-        "/auth/user/login/init" => json(&format!(r#"{{"result_data":"{}"}}"#, "00".repeat(48))),
-        "/auth/user/login/auth" => json(&password_result.lock().unwrap()),
-        "/auth/kaist/user/login/second/view" | "/auth/twofactor/mfa/login2Factor" => {
-            Response::html(r#"<div class="auth_number"><div class="sr-only">42</div></div>"#)
-        }
-        "/auth/kaist/user/login/second/ajaxSendMail" => json(r#"{"errorCode":"SS0001"}"#),
-        "/auth/kaist/user/login/second/ajaxValidCrtfcNo" => json(r#"{"result_code":"SS0001"}"#),
-        "/auth/twofactor/mfa/init" | "/auth/twofactor/mfa/auth" => {
-            json(r#"{"errorCode":"SS0001"}"#)
-        }
-        "/auth/kaist/user/login/check/policy" => json(r#"{"result":true}"#),
-        other => Response::html(format!("unexpected SSO request {other}")).status("404 Not Found"),
     }
 }
 
@@ -205,7 +217,7 @@ struct Fixture {
     state: Arc<State>,
     dirs: Dirs,
     keychain: Keychain,
-    _root: TempDir,
+    root: TempDir,
 }
 
 impl Fixture {
@@ -246,7 +258,7 @@ impl Fixture {
                 state: root.path().join("state/kaist-mail"),
             },
             keychain: secret::tests::fake_security(&bin, &store),
-            _root: root,
+            root,
         }
     }
 
@@ -298,6 +310,18 @@ impl Fixture {
         fixture.login(&LoginOptions::default(), true).unwrap();
         fixture.state.expire_dooray();
         fixture
+    }
+
+    fn password_posts(&self) -> usize {
+        let posts = self.sso_paths();
+        posts
+            .iter()
+            .filter(|path| *path == "/auth/user/login/auth")
+            .count()
+    }
+
+    fn fail_keychain_delete(&self) {
+        fs::write(self.root.path().join("keychain/fail-delete"), "").unwrap();
     }
 
     fn session(&self) -> String {
@@ -594,11 +618,7 @@ fn renewal_never_sends_a_code_or_starts_easy_login() {
     let fixture = Fixture::expired();
     fixture.state.sso_alive.store(false, Ordering::SeqCst);
     let before = fixture.sso_paths().len();
-    let session = fixture.dirs.session();
-    store::set_last_used(&session, 1_000).unwrap();
     let error = fixture.renew().err().unwrap();
-    // A failed renewal is no use of the session.
-    assert_eq!(store::last_used(&session), Some(1_000));
     assert_eq!(error.code, "AUTH_EXPIRED");
     assert!(error.hint.unwrap().contains("--remember-password"));
     assert!(!asks_the_user(&fixture.sso_paths()[before..]));
@@ -654,4 +674,144 @@ fn a_password_kaist_refuses_is_never_resent_by_renewal() {
             "{code}: {paths:?}"
         );
     }
+}
+
+fn password_login() -> LoginOptions {
+    LoginOptions {
+        method: Some(LoginMethod::Password),
+        ..LoginOptions::default()
+    }
+}
+
+#[test]
+fn login_holds_the_session_lock_from_reading_the_password_to_saving_the_session() {
+    let fixture = Fixture::new(Variant::Normal);
+    fixture.remember_password();
+    *fixture.password_result.lock().unwrap() = r#"{"result_code":"EAU001"}"#.to_owned();
+    let held = store::lock_session(&fixture.dirs.session_lock(), Duration::ZERO).unwrap();
+
+    std::thread::scope(|scope| {
+        let login = scope.spawn(|| fixture.login(&password_login(), false));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(fixture.password_posts(), 0);
+        drop(held);
+        assert_eq!(
+            login.join().unwrap().err().unwrap().code,
+            "CREDENTIALS_REJECTED"
+        );
+    });
+    assert_eq!(fixture.password_posts(), 1);
+}
+
+#[test]
+fn waiting_for_the_session_lock_is_bounded() {
+    let fixture = Fixture::new(Variant::Normal);
+    let path = fixture.dirs.session_lock();
+    let _held = store::lock_session(&path, Duration::ZERO).unwrap();
+    let error = store::lock_session(&path, Duration::from_millis(200))
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "NETWORK_ERROR");
+}
+
+#[test]
+fn simultaneous_logins_send_a_refused_stored_password_once() {
+    let fixture = Fixture::new(Variant::Normal);
+    fixture.remember_password();
+    *fixture.password_result.lock().unwrap() = r#"{"result_code":"EAU001"}"#.to_owned();
+
+    std::thread::scope(|scope| {
+        let logins: Vec<_> = (0..6)
+            .map(|_| scope.spawn(|| fixture.login(&password_login(), false)))
+            .collect();
+        for login in logins {
+            assert!(login.join().unwrap().is_err());
+        }
+    });
+    assert_eq!(fixture.password_posts(), 1);
+}
+
+#[test]
+fn logout_waits_for_a_renewal_and_stays_signed_out() {
+    let fixture = Fixture::expired();
+    fixture.state.sso_pause.store(400, Ordering::SeqCst);
+
+    std::thread::scope(|scope| {
+        let renewal = scope.spawn(|| fixture.renew());
+        std::thread::sleep(Duration::from_millis(100));
+        logout_with(&fixture.dirs, Duration::from_secs(5)).unwrap();
+        assert!(renewal.join().unwrap().is_ok());
+    });
+    assert!(!fixture.dirs.session().exists());
+}
+
+#[test]
+fn a_refused_password_that_cannot_be_removed_is_still_never_resent() {
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    fixture.remember_password();
+    *fixture.password_result.lock().unwrap() = r#"{"result_code":"EAU001"}"#.to_owned();
+    fixture.fail_keychain_delete();
+    // An immutable login.json keeps naming the password as stored.
+    let immutable = |flag| {
+        let identity = fixture.dirs.identity();
+        let status = std::process::Command::new("chflags")
+            .arg(flag)
+            .arg(identity)
+            .status();
+        assert!(status.unwrap().success());
+    };
+    immutable("uchg");
+
+    let error = fixture.renew().err().unwrap();
+    let second = fixture.renew().err().unwrap();
+    immutable("nouchg");
+    assert!(error.hint.unwrap().contains("could not remove it"));
+    assert_eq!(second.code, "AUTH_EXPIRED");
+    assert_eq!(fixture.password_posts(), 1);
+}
+
+#[test]
+fn a_code_request_stops_password_renewal_until_the_next_login() {
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    fixture.remember_password();
+
+    for _ in 0..3 {
+        assert_eq!(fixture.renew().err().unwrap().code, "AUTH_EXPIRED");
+    }
+    assert_eq!(fixture.password_posts(), 1);
+    let hold = store::read_hold(&fixture.dirs.password_hold()).unwrap();
+    assert_eq!(hold, Some(store::PasswordHold::CodeRequired));
+
+    // An explicit login, even one stopped at the code, lifts the hold.
+    assert_eq!(
+        fixture.login(&password_login(), false).err().unwrap().code,
+        "CODE_REQUIRED"
+    );
+    assert!(fixture.renew().is_err());
+    assert_eq!(fixture.password_posts(), 3);
+}
+
+#[test]
+fn a_failed_renewal_never_moves_last_used_back() {
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    fixture.state.sso_pause.store(300, Ordering::SeqCst);
+    let used = fixture.dirs.session_used();
+    let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1_000);
+    fs::File::open(&used)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+
+    let marked = std::thread::scope(|scope| {
+        let renewal = scope.spawn(|| fixture.renew());
+        std::thread::sleep(Duration::from_millis(100));
+        store::mark_used(&used).unwrap();
+        let marked = store::last_used(&used).unwrap();
+        assert!(renewal.join().unwrap().is_err());
+        marked
+    });
+    assert!(store::last_used(&used).unwrap() >= marked);
 }

@@ -5,9 +5,12 @@
 //! Login, send a verification code or prompt. Renewals run one at a time
 //! across processes, under the session lock.
 
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use serde_json::json;
@@ -21,10 +24,10 @@ use crate::{
 };
 
 use super::{
-    Attempt, AuthPrompt, CodeStep, Dirs, Env, Identity, Keychain, LoginMethod, Outcome, Renewal,
-    SecondFactor, Via, adopt,
+    Attempt, AuthPrompt, CodeStep, Dirs, Env, Identity, Keychain, LoginMethod, Outcome,
+    PasswordHold, Renewal, SecondFactor, Via, adopt,
     cookies::Jar,
-    drop_rejected_password, epoch_now, flow, sso_url,
+    epoch_now, flow, settle_stored, sso_url,
     store::{self, SsoCheck},
 };
 
@@ -96,12 +99,12 @@ pub fn record_use(base_url: &Url) {
         return;
     };
     let path = dirs.session();
-    let Some(last_used) = store::last_used(&path) else {
+    let used = dirs.session_used();
+    let last_used = store::last_used(&used);
+    let _ = store::mark_used(&used);
+    let Some(idle) = last_used.map(|at| epoch_now().saturating_sub(at)) else {
         return;
     };
-    let now = epoch_now();
-    let _ = store::set_last_used(&path, now);
-    let idle = now.saturating_sub(last_used);
     let longer = |session: &store::StoredSession| {
         session
             .longest_idle_accepted
@@ -111,7 +114,7 @@ pub fn record_use(base_url: &Url) {
     if !matches!(store::read_session(&path, base_url), Ok(Some(session)) if longer(&session)) {
         return;
     }
-    let Ok(_lock) = store::lock_session(&dirs.session_lock()) else {
+    let Ok(_lock) = store::lock_session(&dirs.session_lock(), Duration::ZERO) else {
         return;
     };
     if let Ok(Some(mut session)) = store::read_session(&path, base_url) {
@@ -134,7 +137,7 @@ fn with_env<T>(
         dooray: base_url,
         sso: &sso,
         timeout,
-        keychain: &Keychain::system(),
+        keychain: &Keychain::system().unattended(),
         interactive: false,
         code: CodeStep::Refuse,
         json: true,
@@ -158,11 +161,11 @@ pub(super) struct Renewed {
 
 pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed, AppError> {
     let path = env.dirs.session();
-    let _lock = store::lock_session(&env.dirs.session_lock())?;
+    let _lock = store::lock_session(&env.dirs.session_lock(), env.lock_wait())?;
     let now = epoch_now();
     let mut stored = store::read_session(&path, env.dooray)?
         .ok_or_else(|| AppError::auth_required("there is no saved Dooray session to renew"))?;
-    let last_used = store::last_used(&path).unwrap_or(stored.created_at);
+    let last_used = store::last_used(&env.dirs.session_used()).unwrap_or(stored.created_at);
     let rejected_after = match trigger {
         Trigger::Rejected(rejected) => {
             if let Some(header) = stored
@@ -229,8 +232,23 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
         }
     }
 
-    match store::load_identity(&env.dirs.identity()) {
-        Ok(Some(identity)) if identity.password_saved => {
+    let hold = store::read_hold(&env.dirs.password_hold());
+    match (store::load_identity(&env.dirs.identity()), hold) {
+        (Err(error), _) | (_, Err(error)) => reasons.push(error.message),
+        (Ok(Some(identity)), Ok(Some(hold))) if identity.password_saved => {
+            reasons.push(format!(
+                "the stored password is not used: {}",
+                hold.reason()
+            ));
+            hint = Some(
+                match hold {
+                    PasswordHold::CodeRequired => CODE_HINT,
+                    _ => ENABLE_PASSWORD,
+                }
+                .to_owned(),
+            );
+        }
+        (Ok(Some(identity)), Ok(None)) if identity.password_saved => {
             match password_login(env, identity, &stored.devices) {
                 Ok(completed) => {
                     record.via = Some(Via::Password);
@@ -247,13 +265,11 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
                 }
             }
         }
-        Ok(_) => reasons.push("no password is remembered".to_owned()),
-        Err(error) => reasons.push(error.message),
+        (Ok(_), Ok(_)) => reasons.push("no password is remembered".to_owned()),
     }
 
     stored.renewal = Some(record);
-    let saved = store::save_session(&path, &stored);
-    if let Err(error) = saved.and_then(|()| store::set_last_used(&path, last_used)) {
+    if let Err(error) = store::save_session(&path, &stored) {
         reasons.push(error.message);
     }
     let reasons = reasons.join("; ");
@@ -275,6 +291,8 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
     }
     .with_hint(hint))
 }
+
+const CODE_HINT: &str = "Sign in once from a terminal with `kaist-mail auth login --method password` and enter the code; renewal uses the password again after that login, and skips the code once KAIST registers this device.";
 
 const ENABLE_PASSWORD: &str = "Run `kaist-mail auth login`. To let kaist-mail renew the session without your phone once the KAIST SSO session has also ended, sign in once with `kaist-mail auth login --method password --remember-password`.";
 
@@ -316,6 +334,7 @@ fn password_login(
     let password = env.keychain.lookup(&identity.username)?.ok_or_else(|| {
         AppError::auth_expired("the remembered password is no longer in the keychain")
     })?;
+    store::write_hold(&env.dirs.password_hold(), PasswordHold::Unresolved)?;
     let begun = flow::begin(
         Attempt {
             dooray: env.dooray,
@@ -330,19 +349,18 @@ fn password_login(
         },
         &mut NoPrompt,
     );
-    match begun {
-        // KAIST refused the account as it stands (wrong or stale password,
-        // password change due, lockout): no later renewal may resend it.
-        Err(error) if matches!(error.code, "CREDENTIALS_REJECTED" | "AUTH_REQUIRED") => Err(
-            drop_rejected_password(env, Some(identity), error, Vec::new()),
-        ),
-        Err(error) => Err(error),
-        Ok(begun) => match begun.outcome {
-            Outcome::Complete(completed) => Ok(completed),
-            Outcome::CodeRequired(_) => Err(AppError::internal(
-                "a renewal login stopped for a code it must never request",
-            )),
-        },
+    let mut warnings = Vec::new();
+    let begun = settle_stored(env, Some(identity), begun, &mut warnings)
+        .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+    match begun.outcome {
+        Outcome::Complete(completed) => Ok(completed),
+        Outcome::CodeDeclined => Err(AppError::auth_expired(
+            "KAIST asked for a verification code, so it does not trust this device for password login; renewal stops using the password until the next `kaist-mail auth login`",
+        )
+        .with_hint(CODE_HINT)),
+        Outcome::CodeRequired(_) => Err(AppError::internal(
+            "a renewal login stopped for a code it must never request",
+        )),
     }
 }
 

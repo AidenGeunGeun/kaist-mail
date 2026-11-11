@@ -9,7 +9,7 @@ use std::{
     io::{ErrorKind, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,13 @@ impl Dirs {
     }
     pub fn session_lock(&self) -> PathBuf {
         self.state.join("session.lock")
+    }
+    /// Empty; its modification time is when Dooray last accepted the session.
+    pub fn session_used(&self) -> PathBuf {
+        self.state.join("session.used")
+    }
+    pub fn password_hold(&self) -> PathBuf {
+        self.state.join("password-hold.json")
     }
     pub fn pending(&self) -> PathBuf {
         self.state.join("pending-login.json")
@@ -345,7 +352,6 @@ pub fn load_session(path: &Path, base_url: &Url, now: u64) -> Result<AuthSession
     if !stored.sso.is_empty() {
         status.renewal.available.push(Via::SsoSession);
     }
-    status.renewal.last_used_at = last_used(path);
     status.renewal.longest_idle_accepted = stored.longest_idle_accepted;
     status.renewal.last = stored.renewal.clone();
     Ok(AuthSession {
@@ -393,39 +399,101 @@ pub fn save_session(path: &Path, session: &StoredSession) -> Result<(), AppError
     save_json(path, session, "session")
 }
 
-/// When Dooray last accepted the saved session: the file's modification
-/// time, which saving a new session sets and [`set_last_used`] moves.
+/// When Dooray last accepted the saved session (see [`Dirs::session_used`]).
 pub fn last_used(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
     let since = modified.duration_since(UNIX_EPOCH).ok()?;
     Some(since.as_secs())
 }
 
-/// Set when Dooray last accepted the session without rewriting it (a
-/// rewrite could undo a concurrent renewal).
-pub fn set_last_used(path: &Path, at: u64) -> Result<(), AppError> {
-    fs::File::open(path)
-        .and_then(|file| file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(at)))
+/// Record that Dooray accepted the session just now. A file of its own, so
+/// no rewrite of the session can move it back or undo a renewal.
+pub fn mark_used(path: &Path) -> Result<(), AppError> {
+    private_parent(path, "last-used")?;
+    crate::private_fs::private_file_options()
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now()))
         .map_err(|error| AppError::config(format!("cannot update {}: {error}", path.display())))
 }
 
-/// An exclusive hold on changing the saved session, released on drop or
-/// when the process exits.
+/// An exclusive hold on signing in, renewing and signing out, released on
+/// drop or when the process exits.
 pub struct SessionLock {
     _file: fs::File,
 }
 
-/// Wait until no other kaist-mail process is renewing the session.
-pub fn lock_session(path: &Path) -> Result<SessionLock, AppError> {
+/// Take the session lock, waiting up to `wait` for another kaist-mail
+/// process to finish signing in, renewing or signing out.
+pub fn lock_session(path: &Path, wait: Duration) -> Result<SessionLock, AppError> {
+    use rustix::{fs::FlockOperation, io::Errno};
     private_parent(path, "lock")?;
     let file = crate::private_fs::private_file_options()
         .create(true)
         .truncate(false)
         .open(path)
         .map_err(|error| AppError::config(format!("cannot open {}: {error}", path.display())))?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-        .map_err(|error| AppError::config(format!("cannot lock {}: {error}", path.display())))?;
-    Ok(SessionLock { _file: file })
+    let deadline = Instant::now() + wait;
+    loop {
+        match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(SessionLock { _file: file }),
+            Err(Errno::WOULDBLOCK) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(Errno::WOULDBLOCK) => {
+                return Err(AppError::network(format!(
+                    "another kaist-mail sign-in or renewal was still running after {} s",
+                    wait.as_secs()
+                ))
+                .with_hint("Retry when the other kaist-mail command has finished."));
+            }
+            Err(error) => {
+                return Err(AppError::config(format!(
+                    "cannot lock {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+}
+
+/// Why the stored password must not be sent without the user. Written
+/// before every automatic use and cleared only when KAIST accepted it, so a
+/// crash or a failed cleanup leaves it in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasswordHold {
+    /// An automatic use began and its outcome was never recorded.
+    Unresolved,
+    /// KAIST refused it: wrong, due for a change, or locked.
+    Refused,
+    /// KAIST accepted it but asked for a code; the next explicit login lifts this.
+    CodeRequired,
+}
+
+impl PasswordHold {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Unresolved => "an automatic sign-in with it never recorded KAIST's answer",
+            Self::Refused => "KAIST refused it",
+            Self::CodeRequired => "KAIST asked for a verification code",
+        }
+    }
+}
+
+pub fn read_hold(path: &Path) -> Result<Option<PasswordHold>, AppError> {
+    let Some(bytes) = read_file(path, "password hold")? else {
+        return Ok(None);
+    };
+    // An unreadable hold still holds.
+    Ok(Some(
+        serde_json::from_slice(&bytes).unwrap_or(PasswordHold::Unresolved),
+    ))
+}
+
+pub fn write_hold(path: &Path, hold: PasswordHold) -> Result<(), AppError> {
+    save_json(path, &hold, "password hold")
 }
 
 pub fn origin(url: &Url) -> String {

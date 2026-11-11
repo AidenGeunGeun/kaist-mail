@@ -333,7 +333,7 @@ pub enum AuthCommand {
     /// Report non-secret session metadata and the remembered login (no network).
     #[command(
         long_about = "Report the saved session (path, creation time, cookie names with their expiry, trusted-device count) and the remembered login (user, method, second factor, whether a password is in the keychain). Cookie values and passwords are never printed. This reads local files only; `kaist-mail folders` proves the session still works.",
-        after_help = "JSON data also carries renewal: {available: [sso-session|password], last_used_at, longest_idle_accepted, last: {at, via, dooray_rejected_after?, sso?: {idle, alive}}}.\n\nExample:\n  kaist-mail --json auth status"
+        after_help = "JSON data also carries renewal: {available: [sso-session|password], last_used_at, password_hold: unresolved|refused|code-required|null, longest_idle_accepted, last: {at, via, dooray_rejected_after?, sso?: {idle, alive}}}.\n\nExample:\n  kaist-mail --json auth status"
     )]
     Status,
     /// Keep the saved session alive with one cheap Dooray call.
@@ -365,6 +365,11 @@ Staying signed in:
   (as a browser still signed in to KAIST does), then, with a remembered
   password, by a password login that KAIST lets through without a code on a
   device it trusts. Renewal never starts Easy Login, sends a code or prompts.
+  Once KAIST refuses the stored password, or an automatic use of it ends
+  without KAIST's answer, nothing sends it again until it is stored anew; once
+  KAIST asks for a code, renewal stops using it until the next `auth login`.
+  Sign-ins, renewals and `auth logout` run one at a time, each waiting up to
+  --timeout seconds for another to finish.
   When neither works the command fails with AUTH_EXPIRED and a hint.
   `kaist-mail auth extend` on a schedule keeps the session from idling out.
 

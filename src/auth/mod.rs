@@ -11,7 +11,7 @@ mod secret;
 mod store;
 mod transport;
 
-use std::io::IsTerminal;
+use std::{io::IsTerminal, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -28,7 +28,7 @@ use flow::{Attempt, AuthPrompt, CodeStep, Outcome, TerminalPrompt};
 pub use renew::{extend, record_use, renew, renew_now, take_notes};
 use secret::Keychain;
 pub use store::epoch_now;
-use store::{Dirs, Identity, Renewal, StoredSession, Via};
+use store::{Dirs, Identity, PasswordHold, Renewal, StoredSession, Via};
 
 pub const PRODUCTION_SSO: &str = "https://sso.kaist.ac.kr/";
 
@@ -85,6 +85,8 @@ pub struct AuthStatus {
 pub struct RenewalStatus {
     pub available: Vec<Via>,
     pub last_used_at: Option<u64>,
+    /// Why renewal will not use the stored password, if it will not.
+    pub password_hold: Option<PasswordHold>,
     pub longest_idle_accepted: Option<u64>,
     pub last: Option<Renewal>,
 }
@@ -98,6 +100,18 @@ impl RenewalStatus {
             true => "Renewal: none (any `kaist-mail auth login` keeps the KAIST SSO session; `--method password --remember-password` adds password renewal)".to_owned(),
             false => format!("Renewal: {}", ways.join(", ")),
         }];
+        if let Some(hold) = self.password_hold {
+            let lift = match hold {
+                PasswordHold::CodeRequired => "the next `kaist-mail auth login` lifts this",
+                _ => {
+                    "store it again with `kaist-mail auth login --method password --remember-password`"
+                }
+            };
+            lines.push(format!(
+                "Password renewal stopped: {}; {lift}",
+                hold.reason()
+            ));
+        }
         if let Some(at) = self.last_used_at {
             lines.push(format!("Last used: {} ago", ago(at)));
         }
@@ -157,11 +171,16 @@ pub struct AuthSession {
 pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
     let dirs = Dirs::from_env()?;
     let mut session = store::load_session(&dirs.session(), base_url, epoch_now())?;
+    let renewal = &mut session.status.renewal;
+    renewal.last_used_at = store::last_used(&dirs.session_used());
+    renewal.password_hold = store::read_hold(&dirs.password_hold())?;
+    let hold = renewal.password_hold;
     match store::load_identity(&dirs.identity()) {
         Ok(found) => {
             if found
                 .as_ref()
                 .is_some_and(|identity| identity.password_saved)
+                && hold.is_none()
             {
                 session.status.renewal.available.push(Via::Password);
             }
@@ -201,6 +220,13 @@ struct Env<'a> {
     json: bool,
 }
 
+impl Env<'_> {
+    /// How long to wait for another sign-in, renewal or sign-out.
+    fn lock_wait(&self) -> Duration {
+        Duration::from_secs(self.timeout)
+    }
+}
+
 /// The SSO origin for `base_url`: KAIST's for production Dooray, and for a
 /// loopback fixture the one named by `KAIST_MAIL_SSO_URL`.
 fn sso_url(base_url: &Url) -> Result<Url, AppError> {
@@ -227,7 +253,10 @@ pub fn login(
         dooray: base_url,
         sso: &sso,
         timeout,
-        keychain: &Keychain::system(),
+        keychain: &match interactive {
+            true => Keychain::system(),
+            false => Keychain::system().unattended(),
+        },
         interactive,
         code: if interactive && !json {
             CodeStep::Prompt
@@ -244,6 +273,9 @@ fn login_with(
     options: &LoginOptions,
     mut terminal: impl AuthPrompt,
 ) -> Result<CommandResult, AppError> {
+    // From reading the stored password to saving the session: one sign-in
+    // or renewal at a time, so none resends a password another just had refused.
+    let _lock = store::lock_session(&env.dirs.session_lock(), env.lock_wait())?;
     if let Some(code) = &options.code {
         return resume_login(env, code);
     }
@@ -301,7 +333,14 @@ fn login_with(
     }
 
     let mut warnings = Vec::new();
-    let stored = if password_login && !options.remember_password {
+    let hold_path = env.dirs.password_hold();
+    let hold = store::read_hold(&hold_path)?;
+    if hold == Some(PasswordHold::CodeRequired) {
+        // An explicit login is what lifts this hold.
+        settle_hold(env, Settle::Clear, &mut warnings);
+    }
+    let held = hold.filter(|hold| *hold != PasswordHold::CodeRequired);
+    let stored = if password_login && !options.remember_password && held.is_none() {
         let same_account = remembered
             .as_ref()
             .filter(|found| found.password_saved && Some(&found.username) == username.as_ref());
@@ -311,8 +350,17 @@ fn login_with(
     };
     if password_login && !env.interactive && stored.is_none() {
         let who = username.as_deref().unwrap_or("ID");
+        let message = match held {
+            Some(hold) => format!(
+                "kaist-mail will not send the stored password for {who} again: {}",
+                hold.reason()
+            ),
+            None => {
+                format!("no stored password for {who}, and there is no terminal to ask for one")
+            }
+        };
         return Err(AppError::auth(
-            format!("no stored password for {who}, and there is no terminal to ask for one"),
+            message,
             "Store it once from an interactive shell with `kaist-mail auth login --method password --remember-password`.",
         ));
     }
@@ -324,7 +372,10 @@ fn login_with(
         .map(|session| session.devices)
         .unwrap_or_default();
     let used_stored = stored.is_some();
-    let begun = match flow::begin(
+    if used_stored {
+        store::write_hold(&hold_path, PasswordHold::Unresolved)?;
+    }
+    let begun = flow::begin(
         Attempt {
             dooray: env.dooray,
             sso: env.sso,
@@ -337,12 +388,12 @@ fn login_with(
             password: stored,
         },
         &mut terminal,
-    ) {
-        Err(error) if used_stored && error.code == "CREDENTIALS_REJECTED" => {
-            return Err(drop_rejected_password(env, remembered, error, warnings));
-        }
-        begun => begun?,
-    };
+    );
+    let begun = match used_stored {
+        true => settle_stored(env, remembered.clone(), begun, &mut warnings),
+        false => begun,
+    }
+    .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
     // KAIST accepted the credentials (even if it still wants a code), so it
     // is safe to remember them now.
     let new_password = begun
@@ -370,6 +421,69 @@ fn login_with(
             let error = AppError::code_required(pending.second_factor.as_str(), pending.expires_at);
             Err(store::with_cleanup_warnings(error, &warnings))
         }
+        Outcome::CodeDeclined => Err(AppError::internal(
+            "a login declined the code it was asked to handle",
+        )),
+    }
+}
+
+/// What KAIST's answer to the stored password means for its hold.
+enum Settle {
+    /// KAIST accepted it, or gave no verdict (the request never got an answer).
+    Clear,
+    Hold(PasswordHold),
+    /// The outcome is unclear: leave the hold written before the attempt.
+    Keep,
+}
+
+/// Record KAIST's verdict on an automatic use of the stored password, which
+/// was preceded by [`PasswordHold::Unresolved`]; a refusal also drops it.
+fn settle_stored(
+    env: &Env<'_>,
+    remembered: Option<Identity>,
+    begun: Result<flow::Begun, AppError>,
+    warnings: &mut Vec<String>,
+) -> Result<flow::Begun, AppError> {
+    let settle = match &begun {
+        Ok(flow::Begun {
+            outcome: Outcome::CodeDeclined,
+            ..
+        }) => Settle::Hold(PasswordHold::CodeRequired),
+        Ok(_) => Settle::Clear,
+        // Wrong or stale password, password change due, lockout.
+        Err(error) if matches!(error.code, "CREDENTIALS_REJECTED" | "AUTH_REQUIRED") => {
+            Settle::Hold(PasswordHold::Refused)
+        }
+        Err(error) if error.code == "NETWORK_ERROR" => Settle::Clear,
+        Err(_) => Settle::Keep,
+    };
+    let refused = matches!(settle, Settle::Hold(PasswordHold::Refused));
+    settle_hold(env, settle, warnings);
+    match begun {
+        Err(error) if refused => Err(drop_rejected_password(
+            env,
+            remembered,
+            error,
+            std::mem::take(warnings),
+        )),
+        begun => begun,
+    }
+}
+
+/// Record KAIST's verdict on the stored password. A failure leaves the hold
+/// written before the attempt, which keeps automatic use stopped.
+fn settle_hold(env: &Env<'_>, settle: Settle, warnings: &mut Vec<String>) {
+    let path = env.dirs.password_hold();
+    let settled = match settle {
+        Settle::Clear => store::remove_file(&path, "password hold").map(drop),
+        Settle::Hold(hold) => store::write_hold(&path, hold),
+        Settle::Keep => Ok(()),
+    };
+    if let Err(error) = settled {
+        warnings.push(format!(
+            "could not record the stored password's state: {}",
+            error.message
+        ));
     }
 }
 
@@ -416,16 +530,18 @@ fn drop_rejected_password(
             ));
         }
         if let Err(saved) = store::save_json(&env.dirs.identity(), &identity, "remembered login") {
+            removed = false;
             warnings.push(format!(
                 "could not update the remembered login: {}",
                 saved.message
             ));
         }
     }
+    // Its hold, written before the attempt, keeps it from being sent again.
     let what = if removed {
         "The stored password was removed."
     } else {
-        "The stored password is no longer used but could not be deleted; run `kaist-mail auth forget`."
+        "kaist-mail will not send the stored password again, but could not remove it (see warnings); `kaist-mail auth forget` removes it."
     };
     let next = match error.code {
         "CREDENTIALS_REJECTED" => "Store the current one from a terminal with `kaist-mail auth login --method password --remember-password`.".to_owned(),
@@ -461,7 +577,10 @@ fn remember_login(
     }
     if let Some(password) = new_password {
         match env.keychain.store(&username, password) {
-            Ok(()) => identity.password_saved = true,
+            Ok(()) => {
+                identity.password_saved = true;
+                settle_hold(env, Settle::Clear, warnings);
+            }
             Err(error) => {
                 warnings.push(format!(
                     "could not remember the password: {}",
@@ -520,6 +639,8 @@ fn adopt(
             _ => error,
         })?;
     store::save_session(&path, &session)?;
+    // Only a measurement: a failure must not fail the sign-in.
+    let _ = store::mark_used(&env.dirs.session_used());
     Ok(header)
 }
 
@@ -532,9 +653,7 @@ fn finish_login(
     let cookie_names: Vec<_> = completed.cookies.iter().map(|c| c.name.clone()).collect();
     let device_count = completed.devices.len();
     let session_path = env.dirs.session();
-    store::lock_session(&env.dirs.session_lock())
-        .and_then(|_lock| adopt(env, completed, None))
-        .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+    adopt(env, completed, None).map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
     store::remove_owned(&env.dirs.pending(), "pending login", &mut warnings);
     let method = identity.method.as_str();
     let human = format!(
@@ -577,11 +696,17 @@ fn resume_login(env: &Env<'_>, code: &str) -> Result<CommandResult, AppError> {
     finish_login(env, completed, &identity, warnings)
 }
 
-pub fn logout() -> Result<CommandResult, AppError> {
-    let dirs = Dirs::from_env()?;
+pub fn logout(timeout: u64) -> Result<CommandResult, AppError> {
+    logout_with(&Dirs::from_env()?, Duration::from_secs(timeout))
+}
+
+fn logout_with(dirs: &Dirs, wait: Duration) -> Result<CommandResult, AppError> {
+    // A renewal in flight finishes first, so it cannot bring the session back.
+    let _lock = store::lock_session(&dirs.session_lock(), wait)?;
     let path = dirs.session();
     let mut warnings = Vec::new();
     let removed = store::remove_owned(&path, "Dooray session", &mut warnings);
+    store::remove_owned(&dirs.session_used(), "last-used marker", &mut warnings);
     let pending_removed = store::remove_owned(&dirs.pending(), "pending login", &mut warnings);
     let human = if !warnings.is_empty() {
         "Local logout cleanup was incomplete; see warnings.".to_owned()
