@@ -99,6 +99,7 @@ impl Client {
         let mut policy = Policy {
             base: &self.base,
             cookie: &self.cookie,
+            shown: path,
         };
         let request = Follow {
             method: Method::GET,
@@ -183,6 +184,8 @@ fn failure(failure: Failure) -> AppError {
 struct Policy<'a> {
     base: &'a Url,
     cookie: &'a str,
+    /// What errors call the request; never a server-provided path.
+    shown: &'a str,
 }
 
 impl http::Policy for Policy<'_> {
@@ -214,7 +217,7 @@ impl http::Policy for Policy<'_> {
     fn inspect(&mut self, response: &Response) -> Result<(), AppError> {
         match response.status() {
             200..400 => Ok(()),
-            status => Err(AppError::http(status, response.url().path())),
+            status => Err(AppError::http(status, self.shown)),
         }
     }
 }

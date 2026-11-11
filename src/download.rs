@@ -116,7 +116,14 @@ pub fn attachments(
     let mut files = Vec::new();
     for (file, path, label) in &targets {
         let saved = private_fs::publish_new(path, label, |out| {
-            client.download(&file.download_url, Size::Exact(file.size), limits, out)
+            let shown = format!("part {} of message {id}", file.part);
+            client.download(
+                &file.download_url,
+                &shown,
+                Size::Exact(file.size),
+                limits,
+                out,
+            )
         });
         let (bytes, published) = match saved {
             Ok(saved) => saved,
@@ -173,6 +180,7 @@ pub fn eml(
     let (bytes, warnings) = private_fs::publish_new(&path, &label, |file| {
         client.download(
             &format!("/v2/wapi/mails/{id}?type=raw"),
+            &format!("message {id}"),
             Size::AtMost(MAX_EML),
             limits,
             file,
@@ -198,11 +206,20 @@ fn check_free(path: &Path, label: &str) -> Result<(), AppError> {
     }
 }
 
-/// Names a case-insensitive, normalization-insensitive filesystem (APFS,
-/// HFS+, NTFS) stores as one file share a key.
+/// Names that a case-insensitive, normalization-insensitive filesystem
+/// (APFS, HFS+, NTFS) may store as one share a key: Unicode's compatibility
+/// caseless match, NFKD(fold(NFKD(fold(NFD(name))))), which errs toward
+/// treating names as the same.
 fn same_file_key(name: &str) -> String {
-    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
-    nfc.normalize(&name.to_lowercase()).into_owned()
+    let fold = |text: &str| {
+        icu_casemap::CaseMapper::new()
+            .fold_string(text)
+            .into_owned()
+    };
+    let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
+    let nfkd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd();
+    let once = nfkd.normalize(&fold(&nfd.normalize(name))).into_owned();
+    nfkd.normalize(&fold(&once)).into_owned()
 }
 
 fn with_saved(error: AppError, files: &[Saved]) -> AppError {

@@ -228,11 +228,50 @@ fn transfers_stream_past_the_json_limit_even_for_json_files_and_never_publish_a_
 }
 
 #[test]
+fn download_errors_name_the_part_never_the_download_link() {
+    const CANARY: &str = "/files/SERVER-FILENAME-CANARY.txt";
+    let home = Home::new(Some(&live()));
+    let out = TempDir::new().unwrap();
+    let dir = out.path().to_str().unwrap();
+    let detail = DETAIL.replace(DOCX_PATH, CANARY);
+    let answers: [fn() -> Response; 3] = [
+        || Response::bytes("text/html", "gone").status("404 Not Found"),
+        || Response::bytes("text/plain", vec![0; 10]),
+        || Response::open_ended(vec![0; 10]),
+    ];
+    for answer in answers {
+        let detail = detail.clone();
+        let server = Server::new(move |request: &Request| match request.target.as_str() {
+            DETAIL_PATH => Response::bytes("application/json", detail.clone()),
+            CANARY => answer(),
+            other => panic!("unexpected request {other}"),
+        });
+        let output = home.run(
+            Some(&server),
+            &["--json", "download", ID, "--part", "4", "--out", dir],
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains("part 4"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("CANARY"), "{stderr}");
+    }
+}
+
+#[test]
 fn names_the_filesystem_treats_as_one_fail_before_any_download() {
     let home = Home::new(Some(&live()));
     let out = TempDir::new().unwrap();
     let dir = out.path().to_str().unwrap();
-    for (first, second) in [("가.txt", "\u{1100}\u{1161}.txt"), ("A.txt", "a.txt")] {
+    for (first, second) in [
+        ("가.txt", "\u{1100}\u{1161}.txt"),
+        ("A.txt", "a.txt"),
+        ("Straße.txt", "STRASSE.txt"),
+        ("σ.txt", "ς.txt"),
+        ("S.txt", "ſ.txt"),
+        ("ﬀ.txt", "ff.txt"),
+    ] {
         let detail = DETAIL
             .replace(&format!(r#""{PDF_NAME}""#), &format!(r#""{first}""#))
             .replace(

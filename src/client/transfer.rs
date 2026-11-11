@@ -53,10 +53,12 @@ pub enum Size {
 
 impl Client {
     /// GETs `target`, a site-root path such as an attachment's `downloadUrl`,
-    /// and streams the body into `file`, returning its length.
+    /// and streams the body into `file`, returning its length. Errors call it
+    /// `shown`, since the target can carry Dooray's file name.
     pub fn download(
         &self,
         target: &str,
+        shown: &str,
         size: Size,
         limits: Limits,
         file: &mut File,
@@ -67,11 +69,11 @@ impl Client {
             .ok()
             .filter(|url| url.origin() == self.base.origin())
             .ok_or_else(|| AppError::shape("Dooray gave a download link outside Dooray"))?;
-        let path = url.path().to_owned();
         let agent = http::streaming_agent(limits.remaining()?, limits.stall);
         let mut policy = Policy {
             base: &self.base,
             cookie: &self.cookie,
+            shown,
         };
         let request = Follow {
             method: Method::GET,
@@ -95,26 +97,26 @@ impl Client {
         match (exact, declared) {
             (Some(expected), Some(declared)) if declared != expected && !json => {
                 return Err(shape_error(
-                    &path,
+                    shown,
                     &format!("{declared} bytes for a file Dooray lists as {expected} bytes"),
                 ));
             }
             (_, Some(declared)) if declared > limit => {
                 return Err(AppError::limit(format!(
-                    "Dooray {path} is larger than {limit} bytes"
+                    "Dooray {shown} is larger than {limit} bytes"
                 )));
             }
             _ => {}
         }
         let written = copy(response, file, limit, limits)?;
         let ended_early =
-            || AppError::network(format!("Dooray {path} ended after {written} bytes"));
+            || AppError::network(format!("Dooray {shown} ended after {written} bytes"));
         if declared.is_some_and(|declared| declared != written) {
             return Err(ended_early());
         }
         match exact {
             Some(expected) if written == expected => Ok(written),
-            _ if json => Err(envelope_error(&path, file)),
+            _ if json => Err(envelope_error(shown, file)),
             Some(_) => Err(ended_early()),
             None => Ok(written),
         }
@@ -122,7 +124,7 @@ impl Client {
 }
 
 /// The error the wapi envelope just written to `file` reports.
-fn envelope_error(path: &str, file: &mut File) -> AppError {
+fn envelope_error(shown: &str, file: &mut File) -> AppError {
     let mut bytes = Vec::new();
     let read = file
         .seek(SeekFrom::Start(0))
@@ -130,9 +132,9 @@ fn envelope_error(path: &str, file: &mut File) -> AppError {
     if let Err(error) = read {
         return AppError::config(format!("could not read the download back: {error}"));
     }
-    match check_header(path, &bytes) {
+    match check_header(shown, &bytes) {
         Err(error) => error,
-        Ok(()) => shape_error(path, "JSON instead of the file"),
+        Ok(()) => shape_error(shown, "JSON instead of the file"),
     }
 }
 
