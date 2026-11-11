@@ -62,6 +62,10 @@ struct State {
     sso_alive: AtomicBool,
     /// Milliseconds KAIST SSO takes to answer a SAML request.
     sso_pause: AtomicU64,
+    /// Milliseconds KAIST takes to answer the password, and whether that
+    /// answer is cut off mid-body.
+    password_pause: AtomicU64,
+    password_cut: AtomicBool,
 }
 
 impl State {
@@ -190,7 +194,15 @@ fn sso_route(
                 saml_form()
             }
             "/auth/user/login/init" => json(&format!(r#"{{"result_data":"{}"}}"#, "00".repeat(48))),
-            "/auth/user/login/auth" => json(&password_result.lock().unwrap()),
+            "/auth/user/login/auth" => {
+                let pause = state.password_pause.load(Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(pause));
+                let answer = json(&password_result.lock().unwrap());
+                match state.password_cut.load(Ordering::SeqCst) {
+                    true => answer.declared_length(4096),
+                    false => answer,
+                }
+            }
             "/auth/kaist/user/login/second/view" | "/auth/twofactor/mfa/login2Factor" => {
                 Response::html(r#"<div class="auth_number"><div class="sr-only">42</div></div>"#)
             }
@@ -268,6 +280,7 @@ impl Fixture {
             dooray: &self.dooray_url,
             sso: &self.sso_url,
             timeout: 5,
+            deadline: None,
             keychain: &self.keychain,
             interactive,
             code: if interactive {
@@ -296,6 +309,7 @@ impl Fixture {
             dooray: &self.dooray_url,
             sso: &self.sso_url,
             timeout: 5,
+            deadline: None,
             keychain: &self.keychain,
             interactive: false,
             code: CodeStep::Refuse,
@@ -814,4 +828,91 @@ fn a_failed_renewal_never_moves_last_used_back() {
         marked
     });
     assert!(store::last_used(&used).unwrap() >= marked);
+}
+
+/// Signed in by Easy Login, Dooray ended the session, the KAIST SSO session
+/// is gone, and the password is remembered: renewal will use the password.
+fn by_password() -> Fixture {
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    fixture.remember_password();
+    fixture
+}
+
+fn hold(fixture: &Fixture) -> Option<store::PasswordHold> {
+    store::read_hold(&fixture.dirs.password_hold()).unwrap()
+}
+
+#[test]
+fn a_refusal_cut_off_in_transit_still_stops_the_password() {
+    let fixture = by_password();
+    *fixture.password_result.lock().unwrap() = r#"{"result_code":"EAU001"}"#.to_owned();
+    fixture.state.password_cut.store(true, Ordering::SeqCst);
+
+    for _ in 0..3 {
+        assert!(fixture.renew().is_err());
+    }
+    assert!(fixture.login(&password_login(), false).is_err());
+    assert_eq!(fixture.password_posts(), 1);
+    assert_eq!(hold(&fixture), Some(store::PasswordHold::Unresolved));
+}
+
+#[test]
+fn renewal_while_kaist_is_unreachable_keeps_the_password_usable() {
+    let fixture = by_password();
+    let unreachable = Url::parse("http://127.0.0.1:9/").unwrap();
+    let env = Env {
+        dirs: &fixture.dirs,
+        dooray: &unreachable,
+        sso: &unreachable,
+        timeout: 2,
+        deadline: None,
+        keychain: &fixture.keychain,
+        interactive: false,
+        code: CodeStep::Refuse,
+        json: true,
+    };
+    let error = renew::renew_with(&env, renew::Trigger::Rejected("SESSION=authed"))
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "NETWORK_ERROR", "{}", error.message);
+    assert_eq!(hold(&fixture), None);
+}
+
+#[test]
+fn a_hold_that_cannot_be_written_sends_no_password() {
+    let fixture = by_password();
+    // A directory where the hold's temporary file goes makes writing it fail.
+    let temp = format!("password-hold.json.{}.tmp", std::process::id());
+    fs::create_dir_all(fixture.dirs.state.join(temp).join("x")).unwrap();
+
+    let renewed = fixture.renew();
+    let logged_in = fixture.login(&password_login(), false);
+    assert!(renewed.is_err() && logged_in.is_err());
+    assert_eq!(fixture.password_posts(), 0);
+}
+
+#[test]
+fn a_sign_in_cut_off_after_the_password_left_is_never_resent() {
+    let fixture = by_password();
+    fixture.state.password_pause.store(600, Ordering::SeqCst);
+
+    // While KAIST holds the answer, the disk shows what a process killed now leaves.
+    let left = std::thread::scope(|scope| {
+        let renewal = scope.spawn(|| fixture.renew());
+        while fixture.password_posts() == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let left = fs::read(fixture.dirs.password_hold()).ok();
+        assert!(renewal.join().unwrap().is_err());
+        left
+    });
+    fs::write(
+        fixture.dirs.password_hold(),
+        left.expect("no hold while the password was out"),
+    )
+    .unwrap();
+    assert!(fixture.renew().is_err());
+    assert!(fixture.login(&password_login(), false).is_err());
+    assert_eq!(fixture.password_posts(), 1);
 }

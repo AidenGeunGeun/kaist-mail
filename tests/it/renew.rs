@@ -4,6 +4,7 @@
 use std::{
     fs,
     sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -28,6 +29,11 @@ type Route = Box<dyn Fn(&Request) -> Response + Send + Sync>;
 /// 401 wherever `rejects` says; the renewed one, and the stale one elsewhere,
 /// reach `mail`, except for the system folders a new session is checked with.
 fn renewing(rejects: fn(&Request) -> bool, mail: Route) -> (Server, Server) {
+    renewing_after(Duration::ZERO, rejects, mail)
+}
+
+/// As [`renewing`], with KAIST SSO taking `pause` to answer.
+fn renewing_after(pause: Duration, rejects: fn(&Request) -> bool, mail: Route) -> (Server, Server) {
     let (dooray_url, sso_url) = (
         Arc::new(OnceLock::<String>::new()),
         Arc::new(OnceLock::<String>::new()),
@@ -62,6 +68,7 @@ fn renewing(rejects: fn(&Request) -> bool, mail: Route) -> (Server, Server) {
     });
     let dooray_for_sso = dooray_url.clone();
     let sso = Server::new(move |request: &Request| {
+        std::thread::sleep(pause);
         let live = request
             .header_value("cookie")
             .is_some_and(|c| c.contains("JSESSIONID=live"));
@@ -223,4 +230,35 @@ fn a_rejected_export_saves_the_message_once_with_the_renewed_session() {
     assert_eq!(run(&home, &servers, &args)["data"]["bytes"], RAW.len());
     assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
     assert_eq!(fs::read(out.path().join(format!("{ID}.eml"))).unwrap(), RAW);
+}
+
+#[test]
+fn a_renewal_does_not_outlast_max_seconds_or_retry_after_it() {
+    let mail = |_: &Request| Response::bytes("message/rfc822", RAW);
+    let servers = renewing_after(Duration::from_secs(3), always, Box::new(mail));
+    let home = stale_home(&servers.1);
+    let out = TempDir::new().unwrap();
+
+    let args = [
+        "--json",
+        "export",
+        ID,
+        "--out",
+        out.path().to_str().unwrap(),
+    ];
+    let started = Instant::now();
+    let limits = ["--max-seconds", "1", "--stall-seconds", "1"];
+    let output = home.run_with_sso(
+        Some(&servers.0),
+        Some(&servers.1),
+        &[&args[..], &limits].concat(),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(2_500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(envelope(&output.stderr)["error"]["code"], "NETWORK_ERROR");
+    assert_eq!(count(&servers.0, &format!("/mails/{ID}")), 1);
+    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
 }

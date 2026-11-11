@@ -3,7 +3,7 @@
 
 use std::{
     sync::{Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{
@@ -129,7 +129,7 @@ impl Client {
             .base
             .join(path)
             .map_err(|_| AppError::internal("invalid Dooray API path"))?;
-        let bytes = self.signed(|cookie| {
+        let bytes = self.signed(None, |cookie| {
             let mut policy = Policy {
                 base: &self.base,
                 cookie,
@@ -220,7 +220,12 @@ impl Client {
     /// Send one request with the session cookie. A saved session Dooray
     /// rejects (before any of the answer is used) is renewed once and the
     /// request sent again.
-    fn signed<T>(&self, send: impl Fn(&str) -> Result<T, AppError>) -> Result<T, AppError> {
+    /// A renewal keeps to `deadline`, when the command has one.
+    fn signed<T>(
+        &self,
+        deadline: Option<Instant>,
+        send: impl Fn(&str) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let cookie = self
             .cookie
             .lock()
@@ -228,7 +233,7 @@ impl Client {
             .clone();
         let result = match send(&cookie) {
             Err(error) if self.saved && error.code == "AUTH_EXPIRED" => {
-                let renewed = auth::renew(&self.base, self.timeout, &cookie)?;
+                let renewed = auth::renew(&self.base, self.timeout, deadline, &cookie)?;
                 *self.cookie.lock().unwrap_or_else(PoisonError::into_inner) = renewed.clone();
                 send(&renewed)
             }

@@ -11,7 +11,10 @@ mod secret;
 mod store;
 mod transport;
 
-use std::{io::IsTerminal, time::Duration};
+use std::{
+    io::IsTerminal,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -212,6 +215,8 @@ struct Env<'a> {
     dooray: &'a Url,
     sso: &'a Url,
     timeout: u64,
+    /// The command's own deadline (`--max-seconds`), which a renewal keeps to.
+    deadline: Option<Instant>,
     keychain: &'a Keychain,
     /// Standard input is a terminal, so prompts can be answered.
     interactive: bool,
@@ -253,6 +258,7 @@ pub fn login(
         dooray: base_url,
         sso: &sso,
         timeout,
+        deadline: None,
         keychain: &match interactive {
             true => Keychain::system(),
             false => Keychain::system().unattended(),
@@ -372,20 +378,20 @@ fn login_with(
         .map(|session| session.devices)
         .unwrap_or_default();
     let used_stored = stored.is_some();
-    if used_stored {
-        store::write_hold(&hold_path, PasswordHold::Unresolved)?;
-    }
+    let hold_unresolved = || store::write_hold(&hold_path, PasswordHold::Unresolved);
     let begun = flow::begin(
         Attempt {
             dooray: env.dooray,
             sso: env.sso,
             timeout: env.timeout,
+            deadline: None,
             method,
             factor,
             previous_devices: &previous_devices,
             code: env.code,
             username,
             password: stored,
+            before_password: used_stored.then_some(&hold_unresolved as _),
         },
         &mut terminal,
     );
@@ -429,15 +435,16 @@ fn login_with(
 
 /// What KAIST's answer to the stored password means for its hold.
 enum Settle {
-    /// KAIST accepted it, or gave no verdict (the request never got an answer).
+    /// KAIST accepted it.
     Clear,
     Hold(PasswordHold),
-    /// The outcome is unclear: leave the hold written before the attempt.
+    /// No clear answer: the [`PasswordHold::Unresolved`] written just before
+    /// the password left stays (and none was written if it never left).
     Keep,
 }
 
-/// Record KAIST's verdict on an automatic use of the stored password, which
-/// was preceded by [`PasswordHold::Unresolved`]; a refusal also drops it.
+/// Record KAIST's verdict on an automatic use of the stored password; a
+/// refusal also drops it.
 fn settle_stored(
     env: &Env<'_>,
     remembered: Option<Identity>,
@@ -454,7 +461,6 @@ fn settle_stored(
         Err(error) if matches!(error.code, "CREDENTIALS_REJECTED" | "AUTH_REQUIRED") => {
             Settle::Hold(PasswordHold::Refused)
         }
-        Err(error) if error.code == "NETWORK_ERROR" => Settle::Clear,
         Err(_) => Settle::Keep,
     };
     let refused = matches!(settle, Settle::Hold(PasswordHold::Refused));

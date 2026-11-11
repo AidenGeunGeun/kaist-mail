@@ -9,7 +9,7 @@
 use std::{
     io::{self, Write},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::AnsiX923};
@@ -243,6 +243,7 @@ pub struct Attempt<'a> {
     pub dooray: &'a Url,
     pub sso: &'a Url,
     pub timeout: u64,
+    pub deadline: Option<Instant>,
     pub method: LoginMethod,
     pub factor: Option<SecondFactor>,
     pub previous_devices: &'a [String],
@@ -251,6 +252,9 @@ pub struct Attempt<'a> {
     /// the prompt is asked for the rest.
     pub username: Option<String>,
     pub password: Option<Zeroizing<String>>,
+    /// Runs just before the password leaves for KAIST; an error stops the
+    /// attempt with nothing sent.
+    pub before_password: Option<&'a dyn Fn() -> Result<(), AppError>>,
 }
 
 pub struct Begun {
@@ -265,14 +269,16 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
         dooray,
         sso,
         timeout,
+        deadline,
         method,
         factor,
         previous_devices,
         code,
         username,
         password,
+        before_password,
     } = attempt;
-    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout)?;
+    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout, deadline)?;
     start_saml(&mut transport)?;
     let username = match username {
         Some(username) => username,
@@ -302,7 +308,12 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
             login_id: &username,
             login_pwd: &password,
         };
-        let response = auth_request(&mut transport, &payload, "/auth/user/login/auth")?;
+        let response = auth_request(
+            &mut transport,
+            &payload,
+            "/auth/user/login/auth",
+            before_password,
+        )?;
         match next(Stage::Password, result_code(&response)?)? {
             Next::Link => link(&mut transport)?,
             Next::Device => register_device(&mut transport)?,
@@ -368,7 +379,7 @@ fn prepare(
     timeout: u64,
     pending: &PendingLogin,
 ) -> Result<SsoTransport, AppError> {
-    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout)?;
+    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout, None)?;
     transport.cookies = pending.jar.clone().checked()?;
     if let Some(document) = &pending.document_url {
         let url = Url::parse(document)
@@ -404,10 +415,11 @@ pub fn reuse_sso(
     dooray: &Url,
     sso: &Url,
     timeout: u64,
+    deadline: Option<Instant>,
     session: Jar,
     devices: &[String],
 ) -> Result<Option<CompletedLogin>, AppError> {
-    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout)?;
+    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout, deadline)?;
     transport.cookies = session;
     let (url, html) = saml_request(&mut transport)?;
     if url.path() == LOGIN_VIEW {
@@ -457,6 +469,7 @@ fn auth_request(
     transport: &mut SsoTransport,
     payload: &impl Serialize,
     path: &str,
+    before_send: Option<&dyn Fn() -> Result<(), AppError>>,
 ) -> Result<Value, AppError> {
     let init = transport.ajax("/auth/user/login/init", &[])?;
     let key = init
@@ -466,6 +479,7 @@ fn auth_request(
         .ok_or_else(|| AppError::auth_protocol("KAIST SSO login init omitted its key"))?;
     let payload = encode_secret_json(payload)?;
     let encrypted = encrypt_user_data(key, &payload)?;
+    before_send.map_or(Ok(()), |run| run())?;
     transport.ajax(path, &[("user_data", encrypted.as_str())])
 }
 
@@ -550,7 +564,7 @@ fn easy_login(
     previous_devices: &[String],
 ) -> Result<(), AppError> {
     let payload = json!({"login_id": username, "agt_id": AGENT_ID});
-    let response = auth_request(transport, &payload, "/auth/twofactor/mfa/init")?;
+    let response = auth_request(transport, &payload, "/auth/twofactor/mfa/init", None)?;
     let code = result_code(&response)?;
     if code == "ESY008" {
         return Err(AppError::auth(

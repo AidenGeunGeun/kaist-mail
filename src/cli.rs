@@ -365,8 +365,9 @@ Staying signed in:
   (as a browser still signed in to KAIST does), then, with a remembered
   password, by a password login that KAIST lets through without a code on a
   device it trusts. Renewal never starts Easy Login, sends a code or prompts.
-  Once KAIST refuses the stored password, or an automatic use of it ends
-  without KAIST's answer, nothing sends it again until it is stored anew; once
+  Once KAIST refuses the stored password, or an automatic use of it is cut off
+  after the password left (no clear answer from KAIST), nothing sends it again
+  until it is stored anew; a failure before it left changes nothing. Once
   KAIST asks for a code, renewal stops using it until the next `auth login`.
   Sign-ins, renewals and `auth logout` run one at a time, each waiting up to
   --timeout seconds for another to finish.

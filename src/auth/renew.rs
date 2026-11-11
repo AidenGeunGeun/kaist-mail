@@ -10,7 +10,7 @@ use std::{
         Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -50,13 +50,18 @@ pub fn take_notes() -> Vec<String> {
 
 /// Dooray rejected the saved session sent as `rejected`: renew it and
 /// return the `Cookie` header to retry with.
-pub fn renew(base_url: &Url, timeout: u64, rejected: &str) -> Result<String, AppError> {
+pub fn renew(
+    base_url: &Url,
+    timeout: u64,
+    deadline: Option<Instant>,
+    rejected: &str,
+) -> Result<String, AppError> {
     if RENEWED.swap(true, Ordering::SeqCst) {
         return Err(AppError::auth_expired(
             "Dooray rejected the session kaist-mail had just renewed",
         ));
     }
-    let renewed = with_env(base_url, timeout, |env| {
+    let renewed = with_env(base_url, timeout, deadline, |env| {
         renew_with(env, Trigger::Rejected(rejected))
     })?;
     if let Ok(mut notes) = NOTES.lock() {
@@ -67,7 +72,9 @@ pub fn renew(base_url: &Url, timeout: u64, rejected: &str) -> Result<String, App
 
 /// `auth renew`: replace a working session now, as a rejected one would be.
 pub fn renew_now(base_url: &Url, timeout: u64) -> Result<CommandResult, AppError> {
-    let renewed = with_env(base_url, timeout, |env| renew_with(env, Trigger::Requested))?;
+    let renewed = with_env(base_url, timeout, None, |env| {
+        renew_with(env, Trigger::Requested)
+    })?;
     let data = json!({"via": renewed.via.map(Via::label)});
     output::result("auth.renew", &data, renewed.note)
 }
@@ -128,15 +135,20 @@ pub fn record_use(base_url: &Url) {
 fn with_env<T>(
     base_url: &Url,
     timeout: u64,
+    deadline: Option<Instant>,
     run: impl FnOnce(&Env<'_>) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
     let dirs = Dirs::from_env()?;
     let sso = sso_url(base_url)?;
+    // Each wait (the lock, the check of a new session) fits in what is left.
+    let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+    let timeout = left.map_or(timeout, |left| timeout.min(left.as_secs() + 1));
     run(&Env {
         dirs: &dirs,
         dooray: base_url,
         sso: &sso,
         timeout,
+        deadline,
         keychain: &Keychain::system().unattended(),
         interactive: false,
         code: CodeStep::Refuse,
@@ -198,6 +210,7 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
             env.dooray,
             env.sso,
             env.timeout,
+            env.deadline,
             stored.sso.clone(),
             &stored.devices,
         );
@@ -334,18 +347,20 @@ fn password_login(
     let password = env.keychain.lookup(&identity.username)?.ok_or_else(|| {
         AppError::auth_expired("the remembered password is no longer in the keychain")
     })?;
-    store::write_hold(&env.dirs.password_hold(), PasswordHold::Unresolved)?;
+    let hold_unresolved = || store::write_hold(&env.dirs.password_hold(), PasswordHold::Unresolved);
     let begun = flow::begin(
         Attempt {
             dooray: env.dooray,
             sso: env.sso,
             timeout: env.timeout,
+            deadline: env.deadline,
             method: LoginMethod::Password,
             factor: Some(identity.second_factor.unwrap_or(SecondFactor::Email)),
             previous_devices: devices,
             code: CodeStep::Refuse,
             username: Some(identity.username.clone()),
             password: Some(password),
+            before_password: Some(&hold_unresolved),
         },
         &mut NoPrompt,
     );

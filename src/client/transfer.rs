@@ -69,8 +69,8 @@ impl Client {
             .ok()
             .filter(|url| url.origin() == self.base.origin())
             .ok_or_else(|| AppError::shape("Dooray gave a download link outside Dooray"))?;
-        let agent = http::streaming_agent(limits.remaining()?, limits.stall);
-        let response = self.signed(|cookie| {
+        let response = self.signed(Some(limits.deadline), |cookie| {
+            let agent = http::streaming_agent(limits.remaining()?, limits.stall);
             let mut policy = Policy {
                 base: &self.base,
                 cookie,

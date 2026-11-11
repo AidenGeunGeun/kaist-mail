@@ -1,7 +1,7 @@
 //! The HTTP side of a login: only the Dooray and SSO origins are contacted,
 //! redirects are followed by hand, and cookies live in a per-login jar.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use ureq::Agent;
@@ -18,6 +18,9 @@ const MAX_BODY: usize = 1024 * 1024;
 
 pub struct SsoTransport {
     client: Agent,
+    timeout: Duration,
+    /// No request starts, or runs, past this.
+    deadline: Option<Instant>,
     pub cookies: Jar,
     dooray: Url,
     sso: Url,
@@ -25,7 +28,12 @@ pub struct SsoTransport {
 }
 
 impl SsoTransport {
-    pub fn new(dooray: Url, sso: Url, timeout: u64) -> Result<Self, AppError> {
+    pub fn new(
+        dooray: Url,
+        sso: Url,
+        timeout: u64,
+        deadline: Option<Instant>,
+    ) -> Result<Self, AppError> {
         let production = dooray.scheme() == "https"
             && dooray.host_str() == Some("kaist.gov-dooray.com")
             && sso.scheme() == "https"
@@ -36,8 +44,11 @@ impl SsoTransport {
                 "native login permits only KAIST production origins or loopback test origins",
             ));
         }
+        let timeout = Duration::from_secs(timeout);
         Ok(Self {
-            client: http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8))),
+            client: agent(timeout),
+            timeout,
+            deadline,
             cookies: Jar::default(),
             dooray,
             sso,
@@ -140,12 +151,30 @@ impl SsoTransport {
             max_redirects: if ajax { 0 } else { 8 },
             strict: !ajax,
         };
-        let response = http::follow(&self.client, request, &mut policy).map_err(failure)?;
+        // An agent's timeout bounds each request; under a deadline each one
+        // gets only what is left.
+        let bounded = match self.deadline {
+            None => None,
+            Some(deadline) => match deadline.saturating_duration_since(Instant::now()) {
+                Duration::ZERO => {
+                    return Err(AppError::network(
+                        "sign-in ran out of the command's --max-seconds",
+                    ));
+                }
+                left => Some(agent(left.min(self.timeout))),
+            },
+        };
+        let client = bounded.as_ref().unwrap_or(&self.client);
+        let response = http::follow(client, request, &mut policy).map_err(failure)?;
         if !ajax {
             self.document_url = Some(response.url().clone());
         }
         text(response)
     }
+}
+
+fn agent(timeout: Duration) -> Agent {
+    http::agent(timeout, Some(timeout.min(Duration::from_secs(8))))
 }
 
 fn failure(failure: Failure) -> AppError {
@@ -266,7 +295,7 @@ mod tests {
         // and fail with a timeout instead of the size limit.
         let server = Server::new(|_| Response::open_ended(vec![b'x'; MAX_BODY + 1]));
         let url = Url::parse(&server.url()).unwrap();
-        let mut transport = SsoTransport::new(url.clone(), url.clone(), 2).unwrap();
+        let mut transport = SsoTransport::new(url.clone(), url.clone(), 2, None).unwrap();
         let error = transport.get(url.as_str()).unwrap_err();
         assert_eq!(error.code, "LIMIT_EXCEEDED");
     }
