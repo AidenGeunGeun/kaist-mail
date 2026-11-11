@@ -324,7 +324,7 @@ fn export_saves_the_raw_message_byte_for_byte_without_reading_it() {
 }
 
 #[test]
-fn transfers_dooray_cuts_short_start_over_and_give_up_after_three_attempts() {
+fn transfers_dooray_cuts_short_start_over_and_give_up_after_five_attempts() {
     let home = Home::new(Some(&live()));
     let out = TempDir::new().unwrap();
     let dir = out.path().to_str().unwrap();
@@ -361,7 +361,7 @@ fn transfers_dooray_cuts_short_start_over_and_give_up_after_three_attempts() {
     let error = &envelope(&export.stderr)["error"];
     assert_eq!(error["code"], "NETWORK_ERROR");
     assert!(
-        error["message"].as_str().unwrap().contains("3 attempts"),
+        error["message"].as_str().unwrap().contains("5 attempts"),
         "{error}"
     );
     assert_eq!(
@@ -371,5 +371,5 @@ fn transfers_dooray_cuts_short_start_over_and_give_up_after_three_attempts() {
     );
     let requests = server.requests();
     let count = |path: &str| requests.iter().filter(|line| line.contains(path)).count();
-    assert_eq!((count(PDF_PATH), count(RAW_PATH)), (2, 3));
+    assert_eq!((count(PDF_PATH), count(RAW_PATH)), (2, 5));
 }

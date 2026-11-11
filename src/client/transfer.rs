@@ -54,7 +54,7 @@ pub enum Size {
 
 /// Dooray ends many transfers of a few MB early, at random, and ignores
 /// `Range`; a whole new attempt often completes.
-const ATTEMPTS: usize = 3;
+const ATTEMPTS: usize = 5;
 
 /// Why one attempt failed: Dooray cutting the body short, described for the
 /// user, is worth a new attempt; anything else is final.
