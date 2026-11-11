@@ -22,6 +22,7 @@ use crate::{error::AppError, url::Url};
 
 use super::{
     LoginMethod, SecondFactor,
+    cookies::Jar,
     store::{PendingLogin, StoredCookie, validate_username},
     transport::SsoTransport,
 };
@@ -104,9 +105,25 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
         (_, "SS0001" | "SS0007") | (Policy, "") => Ok(Next::Link),
         (_, "SS0099") => Ok(Next::Device),
         (Password, "SS0098") => Ok(Next::SecondFactor),
-        (Password | Policy, "SS0004" | "SS0005" | "SS0006") => Err(AppError::auth_required(
-            "KAIST requires a password update before this account can sign in",
-        )),
+        // The login page sends these to KAIST's password change; the CLI
+        // leaves account policy alone (no "change later" either).
+        (Password | Policy, "SS0004" | "SS0005" | "SS0006") => {
+            let why = match code {
+                "SS0004" => "this is the account's first sign-in",
+                "SS0005" => "the password was reset",
+                _ => "the password is too old",
+            };
+            let then = match stage {
+                Password => "kaist-mail auth login --method password --remember-password",
+                _ => "kaist-mail auth login",
+            };
+            denied(
+                &format!("KAIST requires a password change before this account can sign in: {why}"),
+                &format!(
+                    "Change the password in a browser by signing in at https://sso.kaist.ac.kr, then run `{then}`."
+                ),
+            )
+        }
         (Password, "EAU001") => Err(AppError::credentials_rejected(
             "KAIST rejected the login identifier or password",
         )),
@@ -198,6 +215,19 @@ fn encrypt_user_data(login_key: &str, json: &[u8]) -> Result<String, AppError> {
 pub struct CompletedLogin {
     pub cookies: Vec<StoredCookie>,
     pub devices: Vec<String>,
+    /// KAIST SSO's own cookies, for a later sign-in without credentials.
+    pub sso: Jar,
+}
+
+/// What a password login does when KAIST asks for a second factor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CodeStep {
+    /// Send the code and prompt for it.
+    Prompt,
+    /// Send the code and stop; a later `--code` run enters it.
+    Defer,
+    /// Stop before KAIST sends anything: nobody is there to read a code.
+    Refuse,
 }
 
 pub enum Outcome {
@@ -213,8 +243,7 @@ pub struct Attempt<'a> {
     pub method: LoginMethod,
     pub factor: Option<SecondFactor>,
     pub previous_devices: &'a [String],
-    /// Stop after sending a second-factor code instead of prompting for it.
-    pub defer_code: bool,
+    pub code: CodeStep,
     /// Answers already known (`--user`, a remembered identifier or password);
     /// the prompt is asked for the rest.
     pub username: Option<String>,
@@ -236,7 +265,7 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
         method,
         factor,
         previous_devices,
-        defer_code,
+        code,
         username,
         password,
     } = attempt;
@@ -274,8 +303,15 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
         match next(Stage::Password, result_code(&response)?)? {
             Next::Link => link(&mut transport)?,
             Next::Device => register_device(&mut transport)?,
+            Next::SecondFactor if code == CodeStep::Refuse => {
+                return Err(AppError::auth_expired(
+                    "KAIST asked for a verification code, so it does not trust this device for password login",
+                )
+                .with_hint("Sign in once from a terminal with `kaist-mail auth login --method password --remember-password` and enter the code; once KAIST registers this device, renewals skip the code."));
+            }
             Next::SecondFactor => {
-                if second_factor(&mut transport, factor, prompt, defer_code)? {
+                let defer = code == CodeStep::Defer;
+                if second_factor(&mut transport, factor, prompt, defer)? {
                     pending = Some(PendingLogin::new(
                         dooray,
                         &username,
@@ -349,7 +385,32 @@ fn finish(transport: &SsoTransport, previous: &[String]) -> Result<CompletedLogi
     devices.extend(transport.cookies.device_values());
     devices.sort();
     devices.dedup();
-    Ok(CompletedLogin { cookies, devices })
+    let sso = transport.cookies.sso_session(transport.sso());
+    Ok(CompletedLogin {
+        cookies,
+        devices,
+        sso,
+    })
+}
+
+/// Answer a fresh Dooray SAML request with a saved KAIST SSO session, as a
+/// browser that is still signed in to KAIST does. `Ok(None)` when KAIST
+/// shows its login page instead, so that session has ended.
+pub fn reuse_sso(
+    dooray: &Url,
+    sso: &Url,
+    timeout: u64,
+    session: Jar,
+    devices: &[String],
+) -> Result<Option<CompletedLogin>, AppError> {
+    let mut transport = SsoTransport::new(dooray.clone(), sso.clone(), timeout)?;
+    transport.cookies = session;
+    let (url, html) = saml_request(&mut transport)?;
+    if url.path() == LOGIN_VIEW {
+        return Ok(None);
+    }
+    handoff(&mut transport, url, &html)?;
+    finish(&transport, devices).map(Some)
 }
 
 /// The password step's JSON body, serialized straight into a zeroized buffer
@@ -544,20 +605,25 @@ fn proceed(transport: &mut SsoTransport, step: Next) -> Result<(), AppError> {
     }
 }
 
-/// Walk Dooray's sign-in entry to its KAIST SAML button and follow it to the
-/// SSO login page, which must be rendered for Dooray's agent.
-fn start_saml(transport: &mut SsoTransport) -> Result<(), AppError> {
+/// Walk Dooray's sign-in entry to its KAIST SAML button and follow it to
+/// wherever KAIST SSO answers the SAML request.
+fn saml_request(transport: &mut SsoTransport) -> Result<(Url, String), AppError> {
     let signin = dooray_url(transport, "/auth/signin")?;
     let (url, html) = transport.get(signin.as_str())?;
-    let (url, html) = if transport.is_dooray_origin(&url) {
-        let button = super::parse::saml_button(&html).ok_or_else(|| {
-            AppError::auth_protocol("Dooray's sign-in page has no KAIST SAML login option")
-        })?;
-        let button = dooray_url(transport, &button)?;
-        transport.get(button.as_str())?
-    } else {
-        (url, html)
-    };
+    if !transport.is_dooray_origin(&url) {
+        return Ok((url, html));
+    }
+    let button = super::parse::saml_button(&html).ok_or_else(|| {
+        AppError::auth_protocol("Dooray's sign-in page has no KAIST SAML login option")
+    })?;
+    let button = dooray_url(transport, &button)?;
+    transport.get(button.as_str())
+}
+
+/// Start a sign-in: the SAML request must reach the SSO login page rendered
+/// for Dooray's agent.
+fn start_saml(transport: &mut SsoTransport) -> Result<(), AppError> {
+    let (url, html) = saml_request(transport)?;
     if url.path() != LOGIN_VIEW || super::parse::agent_id(&html).as_deref() != Some(AGENT_ID) {
         return Err(AppError::auth_protocol(format!(
             "Dooray's SAML request did not reach the KAIST SSO login page for {AGENT_ID} (ended at {}{})",
@@ -729,6 +795,18 @@ mod tests {
         ] {
             assert_eq!(next(stage, code).unwrap_err().code, error, "{code}");
         }
+        // Each password-change demand says why and sends the user to a
+        // browser, not back to the login that just failed.
+        let change: Vec<_> = ["SS0004", "SS0005", "SS0006"]
+            .map(|code| next(Password, code).unwrap_err())
+            .into_iter()
+            .map(|error| (error.message, error.hint.unwrap()))
+            .collect();
+        assert!(
+            change[0].0 != change[1].0 && change[1].0 != change[2].0 && change[0].0 != change[2].0
+        );
+        assert!(change.iter().all(|(_, hint)| hint.contains("in a browser")
+            && hint.contains("--method password --remember-password")));
         assert!(easy_approved("SS0001").unwrap() && !easy_approved("ESY020").unwrap());
         assert_eq!(easy_approved("ESY021").unwrap_err().code, "AUTH_REQUIRED");
         assert_eq!(

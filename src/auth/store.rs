@@ -1,7 +1,8 @@
 //! Everything `kaist-mail auth` keeps on disk, all private (0700 directory,
-//! 0600 file, atomic replace): the Dooray session cookies, the remembered
-//! login (`login.json`, in the config directory so `auth logout` leaves it)
-//! and the pending second-factor login.
+//! 0600 file, atomic replace): the Dooray session cookies with the KAIST SSO
+//! session that renews them, the remembered login (`login.json`, in the
+//! config directory so `auth logout` leaves it) and the pending second-factor
+//! login.
 
 use std::{
     env, fs,
@@ -20,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    AuthSession, AuthStatus, CookieStatus, LoginMethod, SecondFactor,
+    AuthSession, AuthStatus, CookieStatus, LoginMethod, RenewalStatus, SecondFactor,
     cookies::{self, Jar},
 };
 
@@ -59,6 +60,9 @@ impl Dirs {
     pub fn session(&self) -> PathBuf {
         self.state.join("session.json")
     }
+    pub fn session_lock(&self) -> PathBuf {
+        self.state.join("session.lock")
+    }
     pub fn pending(&self) -> PathBuf {
         self.state.join("pending-login.json")
     }
@@ -67,20 +71,26 @@ impl Dirs {
     }
 }
 
-/// Atomically replace `path` with `bytes` at mode 0600 inside a 0700 parent.
-/// `what` names the file in error messages.
-fn write_private(path: &Path, bytes: &[u8], what: &str) -> Result<(), AppError> {
+fn secure(path: &Path, mode: u32) -> Result<(), AppError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| AppError::config(format!("cannot secure {}: {error}", path.display())))
+}
+
+/// Create `path`'s parent directory, owner-only.
+fn private_parent(path: &Path, what: &str) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::internal(format!("invalid {what} path")))?;
     fs::create_dir_all(parent).map_err(|error| {
         AppError::config(format!("cannot create {}: {error}", parent.display()))
     })?;
-    let secure = |path: &Path, mode| {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))
-            .map_err(|error| AppError::config(format!("cannot secure {}: {error}", path.display())))
-    };
-    secure(parent, 0o700)?;
+    secure(parent, 0o700)
+}
+
+/// Atomically replace `path` with `bytes` at mode 0600 inside a 0700 parent.
+/// `what` names the file in error messages.
+fn write_private(path: &Path, bytes: &[u8], what: &str) -> Result<(), AppError> {
+    private_parent(path, what)?;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", std::process::id()));
     let temp = path.with_file_name(name);
@@ -200,15 +210,95 @@ pub struct StoredCookie {
     pub expires_at: Option<u64>,
 }
 
+/// The saved Dooray session, with what renewing it needs and what renewals
+/// have measured about how long Dooray and KAIST SSO keep an idle session.
 #[derive(Serialize, Deserialize)]
-struct StoredSession {
+pub struct StoredSession {
     version: u32,
     origin: String,
-    created_at: u64,
-    cookies: Vec<StoredCookie>,
+    /// When these cookies were obtained, which also last used the SSO session.
+    pub created_at: u64,
+    pub cookies: Vec<StoredCookie>,
     /// KAIST SSO trusted-device ids, offered on the next login.
     #[serde(default)]
-    devices: Vec<String>,
+    pub devices: Vec<String>,
+    /// KAIST SSO's own session; empty when none was captured or it ended.
+    #[serde(default, skip_serializing_if = "Jar::is_empty")]
+    pub sso: Jar,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewal: Option<Renewal>,
+    /// The longest gap, in seconds, after which Dooray still accepted the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longest_idle_accepted: Option<u64>,
+}
+
+/// The last attempt to renew the session without the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Renewal {
+    pub at: u64,
+    /// `None` when no way of renewing worked.
+    pub via: Option<Via>,
+    /// Seconds since the last accepted call when Dooray rejected the
+    /// session; `None` when the user asked for the renewal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dooray_rejected_after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sso: Option<SsoCheck>,
+}
+
+/// Whether KAIST still honoured the saved SSO session after `idle` seconds.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SsoCheck {
+    pub idle: u64,
+    pub alive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Via {
+    SsoSession,
+    Password,
+}
+
+impl Via {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SsoSession => "sso-session",
+            Self::Password => "password",
+        }
+    }
+}
+
+impl StoredSession {
+    /// The session one sign-in produced, keeping what `earlier` measured.
+    pub fn new(
+        base_url: &Url,
+        cookies: Vec<StoredCookie>,
+        devices: Vec<String>,
+        sso: Jar,
+        earlier: Option<&StoredSession>,
+    ) -> Self {
+        Self {
+            version: VERSION,
+            origin: origin(base_url),
+            created_at: epoch_now(),
+            cookies,
+            devices,
+            sso,
+            renewal: earlier.and_then(|earlier| earlier.renewal.clone()),
+            longest_idle_accepted: earlier.and_then(|earlier| earlier.longest_idle_accepted),
+        }
+    }
+
+    /// The `Cookie` header of the cookies that have not expired.
+    pub fn cookie_header(&self, now: u64) -> Option<String> {
+        let header = (self.cookies.iter())
+            .filter(|cookie| cookies::live(cookie.expires_at, now))
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect::<Vec<_>>()
+            .join("; ");
+        (!header.is_empty()).then_some(header)
+    }
 }
 
 fn check_cookies(cookies: &[StoredCookie]) -> Result<(), AppError> {
@@ -231,15 +321,46 @@ pub fn load_session(path: &Path, base_url: &Url, now: u64) -> Result<AuthSession
         device_count: 0,
         remembered: None,
         remembered_error: None,
+        renewal: RenewalStatus::default(),
     };
-    let Some(bytes) = read_file(path, "Dooray session")? else {
+    let Some(stored) = read_session(path, base_url)? else {
         return Ok(AuthSession {
             status,
             cookie_header: None,
             devices: Vec::new(),
         });
     };
-    let stored: StoredSession = serde_json::from_slice(&bytes).map_err(|error| {
+    status.configured = true;
+    status.created_at = Some(stored.created_at);
+    status.device_count = stored.devices.len();
+    status.cookies = stored
+        .cookies
+        .iter()
+        .map(|cookie| CookieStatus {
+            name: cookie.name.clone(),
+            expires_at: cookie.expires_at,
+            expired: !cookies::live(cookie.expires_at, now),
+        })
+        .collect();
+    if !stored.sso.is_empty() {
+        status.renewal.available.push(Via::SsoSession);
+    }
+    status.renewal.last_used_at = last_used(path);
+    status.renewal.longest_idle_accepted = stored.longest_idle_accepted;
+    status.renewal.last = stored.renewal.clone();
+    Ok(AuthSession {
+        status,
+        cookie_header: stored.cookie_header(now),
+        devices: stored.devices,
+    })
+}
+
+/// Read and check the saved session; `None` when there is none.
+pub fn read_session(path: &Path, base_url: &Url) -> Result<Option<StoredSession>, AppError> {
+    let Some(bytes) = read_file(path, "Dooray session")? else {
+        return Ok(None);
+    };
+    let mut stored: StoredSession = serde_json::from_slice(&bytes).map_err(|error| {
         AppError::config(format!(
             "invalid Dooray session {}: {}",
             path.display(),
@@ -258,55 +379,53 @@ pub fn load_session(path: &Path, base_url: &Url, now: u64) -> Result<AuthSession
         ));
     }
     check_cookies(&stored.cookies)?;
-    let live = stored
-        .cookies
-        .iter()
-        .filter(|cookie| cookies::live(cookie.expires_at, now))
-        .collect::<Vec<_>>();
-    let header = live
-        .iter()
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-        .collect::<Vec<_>>()
-        .join("; ");
-    status.configured = true;
-    status.created_at = Some(stored.created_at);
-    status.device_count = stored.devices.len();
-    status.cookies = stored
-        .cookies
-        .iter()
-        .map(|cookie| CookieStatus {
-            name: cookie.name.clone(),
-            expires_at: cookie.expires_at,
-            expired: !cookies::live(cookie.expires_at, now),
-        })
-        .collect();
-    Ok(AuthSession {
-        status,
-        cookie_header: (!header.is_empty()).then_some(header),
-        devices: stored.devices,
-    })
+    stored.sso = stored.sso.checked()?;
+    Ok(Some(stored))
 }
 
-pub fn save_session(
-    path: &Path,
-    base_url: &Url,
-    cookies: Vec<StoredCookie>,
-    devices: Vec<String>,
-) -> Result<(), AppError> {
-    if cookies.is_empty() {
+pub fn save_session(path: &Path, session: &StoredSession) -> Result<(), AppError> {
+    if session.cookies.is_empty() {
         return Err(AppError::auth_protocol(
             "KAIST SSO completed without Dooray issuing a session cookie",
         ));
     }
-    check_cookies(&cookies)?;
-    let stored = StoredSession {
-        version: VERSION,
-        origin: origin(base_url),
-        created_at: epoch_now(),
-        cookies,
-        devices,
-    };
-    save_json(path, &stored, "session")
+    check_cookies(&session.cookies)?;
+    save_json(path, session, "session")
+}
+
+/// When Dooray last accepted the saved session: the file's modification
+/// time, which saving a new session sets and [`set_last_used`] moves.
+pub fn last_used(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
+    let since = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(since.as_secs())
+}
+
+/// Set when Dooray last accepted the session without rewriting it (a
+/// rewrite could undo a concurrent renewal).
+pub fn set_last_used(path: &Path, at: u64) -> Result<(), AppError> {
+    fs::File::open(path)
+        .and_then(|file| file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(at)))
+        .map_err(|error| AppError::config(format!("cannot update {}: {error}", path.display())))
+}
+
+/// An exclusive hold on changing the saved session, released on drop or
+/// when the process exits.
+pub struct SessionLock {
+    _file: fs::File,
+}
+
+/// Wait until no other kaist-mail process is renewing the session.
+pub fn lock_session(path: &Path) -> Result<SessionLock, AppError> {
+    private_parent(path, "lock")?;
+    let file = crate::private_fs::private_file_options()
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| AppError::config(format!("cannot open {}: {error}", path.display())))?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|error| AppError::config(format!("cannot lock {}: {error}", path.display())))?;
+    Ok(SessionLock { _file: file })
 }
 
 pub fn origin(url: &Url) -> String {
@@ -487,7 +606,8 @@ mod tests {
             cookie("old", "x", Some(100)),
             cookie("fresh", "y", Some(200)),
         ];
-        save_session(&path, &dooray(), cookies, vec![]).unwrap();
+        let stored = |cookies| StoredSession::new(&dooray(), cookies, vec![], Jar::default(), None);
+        save_session(&path, &stored(cookies)).unwrap();
         assert_eq!((mode(&path), mode(path.parent().unwrap())), (0o600, 0o700));
         let session = load_session(&path, &dooray(), 100).unwrap();
         assert_eq!(
@@ -503,7 +623,7 @@ mod tests {
             ("n", "a\r\nX: y"),
             ("bad\r\n", "x"),
         ] {
-            let result = save_session(&path, &dooray(), vec![cookie(name, value, None)], vec![]);
+            let result = save_session(&path, &stored(vec![cookie(name, value, None)]));
             assert_eq!(result.unwrap_err().code, "CONFIG_ERROR", "{value:?}");
         }
         for value in ["", "a;b", r"a\tb"] {

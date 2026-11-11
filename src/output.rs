@@ -61,6 +61,16 @@ pub fn result<T: Serialize>(
     })
 }
 
+/// A rough human duration: `45s`, `12m`, `5h`, `3d`.
+pub fn duration(seconds: u64) -> String {
+    match seconds {
+        0..120 => format!("{seconds}s"),
+        120..7_200 => format!("{}m", seconds / 60),
+        7_200..172_800 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
 pub fn print_success(result: &CommandResult, json: bool) {
     if json {
         let envelope = Envelope::Success {

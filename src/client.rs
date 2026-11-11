@@ -1,7 +1,10 @@
 //! The Dooray web API client: one exact origin, the saved session cookies,
 //! bounded bodies, and wapi `header` results turned into errors.
 
-use std::time::Duration;
+use std::{
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
 
 use serde::{
     Deserialize,
@@ -32,7 +35,10 @@ const MAX_BODY: u64 = 8 * 1024 * 1024;
 pub struct Client {
     agent: Agent,
     base: Url,
-    cookie: String,
+    cookie: Mutex<String>,
+    timeout: u64,
+    /// The cookie is the saved session, which `auth` renews when Dooray rejects it.
+    saved: bool,
 }
 
 /// A wapi answer: `{"header": {...}, "result": ...}`.
@@ -77,7 +83,10 @@ impl Client {
                 return Err(AppError::auth_required("not signed in to Dooray"));
             }
         };
-        Ok(Self::with_cookie(base, cookie, timeout))
+        Ok(Self {
+            saved: true,
+            ..Self::with_cookie(base, cookie, timeout)
+        })
     }
 
     /// A client for a `Cookie` header that is not saved yet, such as the one
@@ -86,7 +95,9 @@ impl Client {
         Self {
             agent: http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8))),
             base,
-            cookie,
+            cookie: Mutex::new(cookie),
+            timeout,
+            saved: false,
         }
     }
 
@@ -118,20 +129,22 @@ impl Client {
             .base
             .join(path)
             .map_err(|_| AppError::internal("invalid Dooray API path"))?;
-        let mut policy = Policy {
-            base: &self.base,
-            cookie: &self.cookie,
-            shown: path,
-        };
-        let request = Follow {
-            method,
-            url,
-            payload,
-            max_redirects: 3,
-            strict: true,
-        };
-        let response = http::follow(&self.agent, request, &mut policy).map_err(failure)?;
-        let bytes = read_body(response)?;
+        let bytes = self.signed(|cookie| {
+            let mut policy = Policy {
+                base: &self.base,
+                cookie,
+                shown: path,
+            };
+            let request = Follow {
+                method: method.clone(),
+                url: url.clone(),
+                payload: payload.clone(),
+                max_redirects: 3,
+                strict: true,
+            };
+            let response = http::follow(&self.agent, request, &mut policy).map_err(failure)?;
+            read_body(response)
+        })?;
         // The header decides the outcome before the result's type is checked.
         check_header(path, &bytes)?;
         let envelope: Envelope<IgnoredAny, T> =
@@ -200,6 +213,31 @@ fn failure(failure: Failure) -> AppError {
             AppError::shape("Dooray returned an invalid redirect")
         }
         Failure::TooManyRedirects => AppError::shape("Dooray exceeded the redirect limit"),
+    }
+}
+
+impl Client {
+    /// Send one request with the session cookie. A saved session Dooray
+    /// rejects (before any of the answer is used) is renewed once and the
+    /// request sent again.
+    fn signed<T>(&self, send: impl Fn(&str) -> Result<T, AppError>) -> Result<T, AppError> {
+        let cookie = self
+            .cookie
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let result = match send(&cookie) {
+            Err(error) if self.saved && error.code == "AUTH_EXPIRED" => {
+                let renewed = auth::renew(&self.base, self.timeout, &cookie)?;
+                *self.cookie.lock().unwrap_or_else(PoisonError::into_inner) = renewed.clone();
+                send(&renewed)
+            }
+            result => result,
+        };
+        if self.saved && result.is_ok() {
+            auth::record_use(&self.base);
+        }
+        result
     }
 }
 

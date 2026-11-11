@@ -12,6 +12,7 @@ use std::{
     fs,
     path::PathBuf,
     process::{Command, Output},
+    sync::{Arc, OnceLock},
 };
 
 use serde_json::Value;
@@ -42,7 +43,13 @@ impl Home {
         self.dir.path().join("상태")
     }
 
+    /// Run against `server` as Dooray, which also stands in for a KAIST SSO
+    /// that renewal never reaches without a saved SSO session.
     fn run(&self, server: Option<&Server>, args: &[&str]) -> Output {
+        self.run_with_sso(server, server, args)
+    }
+
+    fn run_with_sso(&self, server: Option<&Server>, sso: Option<&Server>, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_kaist-mail"));
         command
             .args(args)
@@ -55,6 +62,9 @@ impl Home {
             .env_remove("ALL_PROXY");
         if let Some(server) = server {
             command.env("KAIST_MAIL_BASE_URL", server.url());
+        }
+        if let Some(sso) = sso {
+            command.env("KAIST_MAIL_SSO_URL", format!("{}/", sso.url()));
         }
         command.output().unwrap()
     }
@@ -264,4 +274,104 @@ fn only_dooray_or_a_loopback_fixture_is_accepted_as_base_url() {
         let output = home.run(None, &["--json", "--base-url", base, "auth", "status"]);
         assert_eq!(output.status.code(), Some(2), "{base}");
     }
+}
+
+/// Dooray whose API accepts only the session its SAML consumer issues, and a
+/// KAIST SSO that answers Dooray's SAML request from its `JSESSIONID=live`
+/// session. `fickle` Dooray accepts the renewed session for system folders
+/// only, so the next call of the same command is rejected again.
+fn saml_servers(fickle: bool) -> (Server, Server) {
+    let (dooray_url, sso_url) = (
+        Arc::new(OnceLock::<String>::new()),
+        Arc::new(OnceLock::<String>::new()),
+    );
+    let sso_for_dooray = sso_url.clone();
+    let dooray = Server::new(move |request: &Request| {
+        let renewed = request.header_value("cookie") == Some("SESSION=renewed");
+        match (request.method.as_str(), request.target.split('?').next().unwrap()) {
+            ("GET", "/auth/signin") => Response::html(
+                r#"<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"buttons":[{"name":"Students","url":"/idp/login/saml?redirectUrl=%2F"}]}}}</script>"#,
+            )
+            .header("Set-Cookie", "SESSION=anon; Path=/"),
+            ("GET", "/idp/login/saml") => Response::html("").status("302 Found").header(
+                "Location",
+                &format!("{}/auth/kaist/user/saml/login/link/redirect?SAMLRequest=req", sso_for_dooray.get().unwrap()),
+            ),
+            ("POST", "/idp/login/saml/process") => Response::html("")
+                .status("302 Found")
+                .header("Location", "/auth/signin/finalize")
+                .header("Set-Cookie", "SESSION=renewed; Path=/"),
+            ("GET", "/auth/signin/finalize") => Response::html(""),
+            ("GET", "/v2/wapi/mail-folders") if renewed && !(fickle && request.target.contains("type=user")) => {
+                let body = if request.target.contains("type=user") { USER } else { SYSTEM };
+                Response::bytes("application/json", body)
+            }
+            ("GET", "/v2/wapi/mail-folders") => Response::html("").status("401 Unauthorized"),
+            (method, target) => panic!("unexpected Dooray request {method} {target}"),
+        }
+    });
+    let dooray_for_sso = dooray_url.clone();
+    let sso = Server::new(move |request: &Request| {
+        let live = request
+            .header_value("cookie")
+            .is_some_and(|c| c.contains("JSESSIONID=live"));
+        assert!(
+            live && request.target.contains("SAMLRequest"),
+            "unexpected SSO request {}",
+            request.target
+        );
+        Response::html(format!(
+            r#"<form method="post" action="{}/idp/login/saml/process"><input type="hidden" name="SAMLResponse" value="PHNhbWw+"></form>"#,
+            dooray_for_sso.get().unwrap()
+        ))
+    });
+    dooray_url.set(dooray.url()).unwrap();
+    sso_url.set(sso.url()).unwrap();
+    (dooray, sso)
+}
+
+/// A session Dooray no longer accepts, with KAIST SSO's session beside it.
+fn stale_with_sso(sso: &Server) -> String {
+    format!(
+        r#"{{"version":1,"origin":"http://127.0.0.1:0","created_at":1,"cookies":[{{"name":"SESSION","value":"stale"}}],"sso":{{"cookies":[{{"name":"JSESSIONID","value":"live","domain":"127.0.0.1","path":"/auth","secure":false,"source_origin":"{}"}}],"devices":[]}}}}"#,
+        sso.url()
+    )
+}
+
+#[test]
+fn a_command_renews_a_rejected_session_from_the_kaist_sso_session_and_retries() {
+    let (dooray, sso) = saml_servers(false);
+    let home = Home::new(Some(&stale_with_sso(&sso)));
+
+    let output = home.run_with_sso(Some(&dooray), Some(&sso), &["--json", "folders"]);
+    assert!(output.status.success(), "{output:?}");
+    let json = envelope(&output.stdout);
+    assert_eq!(json["meta"]["total"], 8);
+    let warning = json["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("renewed it with the KAIST SSO session"),
+        "{warning}"
+    );
+    let saved = fs::read_to_string(home.state().join("kaist-mail/session.json")).unwrap();
+    assert!(saved.contains(r#""value": "renewed""#), "{saved}");
+
+    let output = home.run_with_sso(Some(&dooray), Some(&sso), &["--json", "auth", "status"]);
+    let renewal = &envelope(&output.stdout)["data"]["renewal"];
+    assert_eq!(renewal["available"], serde_json::json!(["sso-session"]));
+    assert_eq!(renewal["last"]["via"], "sso-session");
+}
+
+#[test]
+fn a_session_dooray_keeps_rejecting_is_renewed_only_once_per_command() {
+    let (dooray, sso) = saml_servers(true);
+    let home = Home::new(Some(&stale_with_sso(&sso)));
+
+    let output = home.run_with_sso(Some(&dooray), Some(&sso), &["--json", "folders"]);
+    assert_eq!(envelope(&output.stderr)["error"]["code"], "AUTH_EXPIRED");
+    let consumed = dooray
+        .requests()
+        .iter()
+        .filter(|line| line.contains("/idp/login/saml/process"))
+        .count();
+    assert_eq!(consumed, 1);
 }

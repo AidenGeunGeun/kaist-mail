@@ -70,19 +70,21 @@ impl Client {
             .filter(|url| url.origin() == self.base.origin())
             .ok_or_else(|| AppError::shape("Dooray gave a download link outside Dooray"))?;
         let agent = http::streaming_agent(limits.remaining()?, limits.stall);
-        let mut policy = Policy {
-            base: &self.base,
-            cookie: &self.cookie,
-            shown,
-        };
-        let request = Follow {
-            method: Method::GET,
-            url,
-            payload: None,
-            max_redirects: 3,
-            strict: true,
-        };
-        let response = http::follow(&agent, request, &mut policy).map_err(failure)?;
+        let response = self.signed(|cookie| {
+            let mut policy = Policy {
+                base: &self.base,
+                cookie,
+                shown,
+            };
+            let request = Follow {
+                method: Method::GET,
+                url: url.clone(),
+                payload: None,
+                max_redirects: 3,
+                strict: true,
+            };
+            http::follow(&agent, request, &mut policy).map_err(failure)
+        })?;
         let declared = response.content_length();
         let (exact, max) = match size {
             Size::Exact(bytes) => (Some(bytes), bytes),

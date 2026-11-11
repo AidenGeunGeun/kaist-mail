@@ -1,11 +1,12 @@
 //! Native KAIST SSO login to Dooray and the files it leaves behind. This
-//! module is the orchestration (`login`, `logout`, `forget`, `load`); the
-//! sign-in conversation is in `flow`, the on-disk state in `store`, password
-//! storage in `secret`.
+//! module is the orchestration (`login`, `logout`, `forget`, `load`); renewal
+//! without the user is in `renew`, the sign-in conversation in `flow`, the
+//! on-disk state in `store`, password storage in `secret`.
 
 mod cookies;
 mod flow;
 mod parse;
+mod renew;
 mod secret;
 mod store;
 mod transport;
@@ -23,10 +24,11 @@ use crate::{
 };
 
 pub use flow::is_signin_path;
-use flow::{Attempt, AuthPrompt, Outcome, TerminalPrompt};
+use flow::{Attempt, AuthPrompt, CodeStep, Outcome, TerminalPrompt};
+pub use renew::{extend, record_use, renew, renew_now, take_notes};
 use secret::Keychain;
 pub use store::epoch_now;
-use store::{Dirs, Identity};
+use store::{Dirs, Identity, Renewal, StoredSession, Via};
 
 pub const PRODUCTION_SSO: &str = "https://sso.kaist.ac.kr/";
 
@@ -74,6 +76,60 @@ pub struct AuthStatus {
     pub remembered: Option<Remembered>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remembered_error: Option<String>,
+    pub renewal: RenewalStatus,
+}
+
+/// How the session can be renewed without the user, and what is known
+/// about how long Dooray and KAIST SSO keep an idle session.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RenewalStatus {
+    pub available: Vec<Via>,
+    pub last_used_at: Option<u64>,
+    pub longest_idle_accepted: Option<u64>,
+    pub last: Option<Renewal>,
+}
+
+impl RenewalStatus {
+    /// `auth status` lines for people.
+    pub fn lines(&self, now: u64) -> Vec<String> {
+        let ago = |at: u64| output::duration(now.saturating_sub(at));
+        let ways: Vec<_> = self.available.iter().map(|via| via.label()).collect();
+        let mut lines = vec![match ways.is_empty() {
+            true => "Renewal: none (any `kaist-mail auth login` keeps the KAIST SSO session; `--method password --remember-password` adds password renewal)".to_owned(),
+            false => format!("Renewal: {}", ways.join(", ")),
+        }];
+        if let Some(at) = self.last_used_at {
+            lines.push(format!("Last used: {} ago", ago(at)));
+        }
+        if let Some(idle) = self.longest_idle_accepted {
+            lines.push(format!(
+                "Dooray accepted the session after up to {} idle",
+                output::duration(idle)
+            ));
+        }
+        if let Some(last) = &self.last {
+            let mut line = format!(
+                "Last renewal: {} ago, {}",
+                ago(last.at),
+                last.via.map_or("failed", Via::label)
+            );
+            if let Some(idle) = last.dooray_rejected_after {
+                line.push_str(&format!(
+                    "; Dooray had rejected the session after {} idle",
+                    output::duration(idle)
+                ));
+            }
+            if let Some(sso) = last.sso {
+                let state = if sso.alive { "still valid" } else { "ended" };
+                line.push_str(&format!(
+                    "; KAIST SSO session {state} after {} idle",
+                    output::duration(sso.idle)
+                ));
+            }
+            lines.push(line);
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +159,12 @@ pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
     let mut session = store::load_session(&dirs.session(), base_url, epoch_now())?;
     match store::load_identity(&dirs.identity()) {
         Ok(found) => {
+            if found
+                .as_ref()
+                .is_some_and(|identity| identity.password_saved)
+            {
+                session.status.renewal.available.push(Via::Password);
+            }
             session.status.remembered = found.map(|identity| Remembered {
                 username: identity.username,
                 method: identity.method.as_str().to_owned(),
@@ -134,8 +196,7 @@ struct Env<'a> {
     keychain: &'a Keychain,
     /// Standard input is a terminal, so prompts can be answered.
     interactive: bool,
-    /// Stop after sending a second-factor code instead of prompting for it.
-    defer_code: bool,
+    code: CodeStep,
     /// `--json`: stderr carries only the JSON error document, so stay quiet.
     json: bool,
 }
@@ -168,7 +229,11 @@ pub fn login(
         timeout,
         keychain: &Keychain::system(),
         interactive,
-        defer_code: !interactive || json,
+        code: if interactive && !json {
+            CodeStep::Prompt
+        } else {
+            CodeStep::Defer
+        },
         json,
     };
     login_with(&env, options, TerminalPrompt)
@@ -267,7 +332,7 @@ fn login_with(
             method,
             factor,
             previous_devices: &previous_devices,
-            defer_code: env.defer_code,
+            code: env.code,
             username,
             password: stored,
         },
@@ -329,10 +394,11 @@ fn stored_password(
     }
 }
 
-/// KAIST rejected the stored password. Every later non-interactive login would
-/// resend it, and KAIST locks password login after repeated failures, so
-/// login.json stops naming it even when the keychain cannot delete it now;
-/// `auth forget` purges the whole service without that metadata.
+/// KAIST refused the stored password: rejected it, or wants it changed, or
+/// locked password login. Every later non-interactive login would resend it,
+/// and KAIST locks password login after repeated failures, so login.json
+/// stops naming it even when the keychain cannot delete it now; `auth forget`
+/// purges the whole service without that metadata.
 fn drop_rejected_password(
     env: &Env<'_>,
     remembered: Option<Identity>,
@@ -361,9 +427,11 @@ fn drop_rejected_password(
     } else {
         "The stored password is no longer used but could not be deleted; run `kaist-mail auth forget`."
     };
-    let error = error.with_hint(format!(
-        "{what} Store the current one from a terminal with `kaist-mail auth login --method password --remember-password`."
-    ));
+    let next = match error.code {
+        "CREDENTIALS_REJECTED" => "Store the current one from a terminal with `kaist-mail auth login --method password --remember-password`.".to_owned(),
+        _ => error.hint.clone().unwrap_or_default(),
+    };
+    let error = error.with_hint(format!("{what} {next}"));
     store::with_cleanup_warnings(error, &warnings)
 }
 
@@ -425,38 +493,48 @@ fn remember_login(
     identity
 }
 
-fn finish_login(
+/// Save the session a sign-in produced once Dooray treats it as signed in,
+/// keeping what the old session measured; returns its `Cookie` header.
+fn adopt(
     env: &Env<'_>,
     completed: flow::CompletedLogin,
-    identity: &Identity,
-    mut warnings: Vec<String>,
-) -> Result<CommandResult, AppError> {
-    // Save only a session Dooray actually treats as signed in.
-    let header = completed
-        .cookies
-        .iter()
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-        .collect::<Vec<_>>()
-        .join("; ");
-    crate::client::Client::with_cookie(env.dooray.clone(), header, env.timeout)
+    renewal: Option<Renewal>,
+) -> Result<String, AppError> {
+    let path = env.dirs.session();
+    let earlier = store::read_session(&path, env.dooray).ok().flatten();
+    let mut session = StoredSession::new(
+        env.dooray,
+        completed.cookies,
+        completed.devices,
+        completed.sso,
+        earlier.as_ref(),
+    );
+    session.renewal = renewal.or(session.renewal);
+    let header = session.cookie_header(epoch_now()).unwrap_or_default();
+    crate::client::Client::with_cookie(env.dooray.clone(), header.clone(), env.timeout)
         .wapi::<serde::de::IgnoredAny>(crate::client::SYSTEM_FOLDERS)
         .map_err(|error| match error.code {
             "AUTH_EXPIRED" => AppError::auth_protocol(
                 "Dooray did not accept the session the KAIST SSO sign-in produced",
             ),
             _ => error,
-        })
-        .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+        })?;
+    store::save_session(&path, &session)?;
+    Ok(header)
+}
+
+fn finish_login(
+    env: &Env<'_>,
+    completed: flow::CompletedLogin,
+    identity: &Identity,
+    mut warnings: Vec<String>,
+) -> Result<CommandResult, AppError> {
     let cookie_names: Vec<_> = completed.cookies.iter().map(|c| c.name.clone()).collect();
     let device_count = completed.devices.len();
     let session_path = env.dirs.session();
-    store::save_session(
-        &session_path,
-        env.dooray,
-        completed.cookies,
-        completed.devices,
-    )
-    .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+    store::lock_session(&env.dirs.session_lock())
+        .and_then(|_lock| adopt(env, completed, None))
+        .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
     store::remove_owned(&env.dirs.pending(), "pending login", &mut warnings);
     let method = identity.method.as_str();
     let human = format!(

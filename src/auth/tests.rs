@@ -4,7 +4,10 @@
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tempfile::TempDir;
@@ -47,12 +50,50 @@ enum Variant {
     Offsite,
 }
 
+/// What the fixture servers remember between requests.
+#[derive(Default)]
+struct State {
+    /// The Dooray sessions the API accepts; the ACS issues `authed`, then
+    /// `authed2`, `authed3`, ...
+    issued: Mutex<Vec<String>>,
+    accepted: Mutex<Vec<String>>,
+    /// KAIST SSO completed a sign-in on its `JSESSIONID=sso` session and
+    /// still honours it.
+    sso_alive: AtomicBool,
+}
+
+impl State {
+    fn issue(&self) -> String {
+        let mut issued = self.issued.lock().unwrap();
+        let value = match issued.len() {
+            0 => "authed".to_owned(),
+            n => format!("authed{}", n + 1),
+        };
+        issued.push(value.clone());
+        self.accepted.lock().unwrap().push(value.clone());
+        value
+    }
+
+    fn accepts(&self, request: &Request) -> bool {
+        let session = request
+            .header_value("cookie")
+            .and_then(|c| c.strip_prefix("SESSION="));
+        session.is_some_and(|session| self.accepted.lock().unwrap().iter().any(|s| s == session))
+    }
+
+    /// Dooray ends every session it issued, as its idle timeout does.
+    fn expire_dooray(&self) {
+        self.accepted.lock().unwrap().clear();
+    }
+}
+
 /// Dooray: sign-in entry, IdP chooser, SAML request, assertion consumer, and
-/// the folder API, which answers only an authenticated session.
+/// the API, which answers only a session it accepts.
 fn dooray_route(
     sso: Arc<OnceLock<String>>,
     offsite: String,
     variant: Variant,
+    state: Arc<State>,
 ) -> impl Fn(&Request) -> Response + Send + Sync {
     move |request| match (request.method.as_str(), path(&request.target)) {
         ("GET", "/auth/signin") => redirect("/idp/init?redirectUrl=%2F")
@@ -76,17 +117,16 @@ fn dooray_route(
             }
             Variant::Anonymous => redirect("/auth/signin/finalize?nextUrl=%2F"),
             _ => redirect("/auth/signin/finalize?nextUrl=%2F")
-                .header("Set-Cookie", "SESSION=authed; Path=/; HttpOnly")
+                .header(
+                    "Set-Cookie",
+                    &format!("SESSION={}; Path=/; HttpOnly", state.issue()),
+                )
                 .header("Set-Cookie", "scoped=x; Path=/idp"),
         },
         ("GET", "/auth/signin/finalize") => Response::html("<script>location.href='/'</script>"),
-        ("GET", "/v2/wapi/mail-folders")
-            if request.header_value("cookie") == Some("SESSION=authed") =>
-        {
-            json(
-                r#"{"header":{"isSuccessful":true,"resultCode":0,"resultMessage":""},"result":{"totalCount":0,"contents":[]}}"#,
-            )
-        }
+        ("GET", "/v2/wapi/mail-folders") if state.accepts(request) => json(
+            r#"{"header":{"isSuccessful":true,"resultCode":0,"resultMessage":""},"result":{"totalCount":0,"contents":[]}}"#,
+        ),
         ("GET", "/v2/wapi/mail-folders") => Response::html("").status("401 Unauthorized"),
         (method, path) => panic!("unexpected Dooray request {method} {path}"),
     }
@@ -97,12 +137,32 @@ fn sso_route(
     dooray: Arc<OnceLock<String>>,
     variant: Variant,
     password_result: Arc<Mutex<String>>,
+    state: Arc<State>,
 ) -> impl Fn(&Request) -> Response + Send + Sync {
     let agent = match variant {
         Variant::ForeignAgent => "kaist-prod-klms",
         _ => "kaist-prod-dooray",
     };
+    let saml_form = {
+        let dooray = dooray.clone();
+        move || {
+            Response::html(format!(
+                r#"<form method="post" action="{}{}"><input type="hidden" name="SAMLResponse" value="PHNhbWw+"></form><script>document.forms[0].submit()</script>"#,
+                dooray.get().unwrap(),
+                &ACS[1..]
+            ))
+        }
+    };
     move |request| match path(&request.target) {
+        "/auth/kaist/user/saml/login/link/redirect"
+            if request.target.contains("SAMLRequest")
+                && state.sso_alive.load(Ordering::SeqCst)
+                && request
+                    .header_value("cookie")
+                    .is_some_and(|c| c.contains("JSESSIONID=sso")) =>
+        {
+            saml_form()
+        }
         "/auth/kaist/user/saml/login/link/redirect" if request.target.contains("SAMLRequest") => {
             redirect("/auth/kaist/user/login/view")
                 .header("Set-Cookie", "JSESSIONID=sso; Path=/auth; HttpOnly")
@@ -116,11 +176,10 @@ fn sso_route(
                 dooray.get().unwrap(),
             ))
         }
-        "/auth/kaist/user/saml/login/link/redirect" => Response::html(format!(
-            r#"<form method="post" action="{}{}"><input type="hidden" name="SAMLResponse" value="PHNhbWw+"></form><script>document.forms[0].submit()</script>"#,
-            dooray.get().unwrap(),
-            &ACS[1..]
-        )),
+        "/auth/kaist/user/saml/login/link/redirect" => {
+            state.sso_alive.store(true, Ordering::SeqCst);
+            saml_form()
+        }
         "/auth/user/login/init" => json(&format!(r#"{{"result_data":"{}"}}"#, "00".repeat(48))),
         "/auth/user/login/auth" => json(&password_result.lock().unwrap()),
         "/auth/kaist/user/login/second/view" | "/auth/twofactor/mfa/login2Factor" => {
@@ -143,6 +202,7 @@ struct Fixture {
     dooray_url: Url,
     sso_url: Url,
     password_result: Arc<Mutex<String>>,
+    state: Arc<State>,
     dirs: Dirs,
     keychain: Keychain,
     _root: TempDir,
@@ -153,16 +213,19 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let (dooray_cell, sso_cell) = (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
         let password_result = Arc::new(Mutex::new(r#"{"result_code":"SS0098"}"#.to_owned()));
+        let state = Arc::new(State::default());
         let offsite = Server::new(|_: &Request| Response::html(""));
         let dooray = Server::new(dooray_route(
             sso_cell.clone(),
             format!("{}/", offsite.url()),
             variant,
+            state.clone(),
         ));
         let sso = Server::new(sso_route(
             dooray_cell.clone(),
             variant,
             password_result.clone(),
+            state.clone(),
         ));
         dooray_cell.set(format!("{}/", dooray.url())).unwrap();
         sso_cell.set(format!("{}/", sso.url())).unwrap();
@@ -177,6 +240,7 @@ impl Fixture {
             sso,
             offsite,
             password_result,
+            state,
             dirs: Dirs {
                 config: root.path().join("config/kaist-mail"),
                 state: root.path().join("state/kaist-mail"),
@@ -194,7 +258,11 @@ impl Fixture {
             timeout: 5,
             keychain: &self.keychain,
             interactive,
-            defer_code: !interactive,
+            code: if interactive {
+                CodeStep::Prompt
+            } else {
+                CodeStep::Defer
+            },
             json: true,
         };
         login_with(&env, options, Terminal)
@@ -207,6 +275,29 @@ impl Fixture {
         identity.password_saved = true;
         store::save_json(&self.dirs.identity(), &identity, "remembered login").unwrap();
         self.keychain.store("student", "s3cret").unwrap();
+    }
+
+    /// Renew as a command does once Dooray rejected `SESSION=authed`.
+    fn renew(&self) -> Result<renew::Renewed, AppError> {
+        let env = Env {
+            dirs: &self.dirs,
+            dooray: &self.dooray_url,
+            sso: &self.sso_url,
+            timeout: 5,
+            keychain: &self.keychain,
+            interactive: false,
+            code: CodeStep::Refuse,
+            json: true,
+        };
+        renew::renew_with(&env, renew::Trigger::Rejected("SESSION=authed"))
+    }
+
+    /// Signed in by Easy Login, then Dooray ends the session.
+    fn expired() -> Self {
+        let fixture = Self::new(Variant::Normal);
+        fixture.login(&LoginOptions::default(), true).unwrap();
+        fixture.state.expire_dooray();
+        fixture
     }
 
     fn session(&self) -> String {
@@ -281,10 +372,19 @@ fn easy_login_follows_dooray_saml_to_sso_and_posts_the_response_back() {
     );
 
     let session = fixture.session();
-    assert!(session.contains(r#""value": "authed""#), "{session}");
-    assert!(
-        !session.contains("JSESSIONID") && !session.contains("scoped"),
-        "{session}"
+    assert!(!session.contains("scoped"), "{session}");
+    let session: serde_json::Value = serde_json::from_str(&session).unwrap();
+    assert_eq!(session["cookies"][0]["value"], "authed");
+    assert_eq!(session["cookies"].as_array().unwrap().len(), 1);
+    // KAIST SSO's session is kept apart, bound to the SSO origin.
+    let sso = &session["sso"]["cookies"];
+    assert_eq!(
+        (sso[0]["name"].as_str(), sso.as_array().unwrap().len()),
+        (Some("JSESSIONID"), 1)
+    );
+    assert_eq!(
+        sso[0]["source_origin"],
+        fixture.sso_url.origin().ascii_serialization()
     );
     let mode = fs::metadata(fixture.dirs.session())
         .unwrap()
@@ -420,5 +520,138 @@ fn unrecognized_sso_codes_are_never_echoed() {
         let error = fixture.login(&password(), false).err().unwrap();
         assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED");
         assert!(!error.message.contains(code), "{}", error.message);
+    }
+}
+
+/// Requests that would put a code or a push in front of the user.
+const ASKS_THE_USER: [&str; 3] = [
+    "/auth/kaist/user/login/second/ajaxSendMail",
+    "/auth/twofactor/mfa/init",
+    "/auth/twofactor/mfa/login2Factor",
+];
+
+fn asks_the_user(paths: &[String]) -> bool {
+    paths
+        .iter()
+        .any(|path| ASKS_THE_USER.contains(&path.as_str()))
+}
+
+#[test]
+fn a_rejected_session_is_renewed_from_the_kaist_sso_session_without_credentials() {
+    let fixture = Fixture::expired();
+    let before = fixture.sso_paths().len();
+
+    let renewed = fixture.renew().unwrap();
+    assert_eq!(renewed.header, "SESSION=authed2");
+    assert_eq!(renewed.via, Some(Via::SsoSession));
+    assert_eq!(
+        fixture.sso_paths()[before..],
+        ["/auth/kaist/user/saml/login/link/redirect"]
+    );
+    let session: serde_json::Value = serde_json::from_str(&fixture.session()).unwrap();
+    assert_eq!(session["cookies"][0]["value"], "authed2");
+    assert_eq!(session["renewal"]["via"], "sso-session");
+    assert_eq!(session["renewal"]["sso"]["alive"], true);
+}
+
+#[test]
+fn an_ended_sso_session_falls_back_to_a_password_login_kaist_lets_through() {
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    fixture.remember_password();
+    // KAIST skips the second factor for a trusted device.
+    *fixture.password_result.lock().unwrap() = r#"{"result_code":"SS0001"}"#.to_owned();
+    let before = fixture.sso_paths().len();
+
+    let renewed = fixture.renew().unwrap();
+    assert_eq!(
+        (renewed.header.as_str(), renewed.via),
+        ("SESSION=authed2", Some(Via::Password))
+    );
+    let paths = &fixture.sso_paths()[before..];
+    assert!(
+        paths.iter().any(|path| path == "/auth/user/login/auth"),
+        "{paths:?}"
+    );
+    assert!(!asks_the_user(paths), "{paths:?}");
+    let session: serde_json::Value = serde_json::from_str(&fixture.session()).unwrap();
+    assert_eq!(session["renewal"]["sso"]["alive"], false);
+}
+
+#[test]
+fn renewal_never_sends_a_code_or_starts_easy_login() {
+    // A password KAIST accepts but follows with a code request.
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    fixture.remember_password();
+    let before = fixture.sso_paths().len();
+    let error = fixture.renew().err().unwrap();
+    assert_eq!(error.code, "AUTH_EXPIRED");
+    assert!(error.hint.unwrap().contains("--method password"));
+    assert!(!asks_the_user(&fixture.sso_paths()[before..]));
+
+    // Easy Login remembered and no password: nothing to try without the phone.
+    let fixture = Fixture::expired();
+    fixture.state.sso_alive.store(false, Ordering::SeqCst);
+    let before = fixture.sso_paths().len();
+    let session = fixture.dirs.session();
+    store::set_last_used(&session, 1_000).unwrap();
+    let error = fixture.renew().err().unwrap();
+    // A failed renewal is no use of the session.
+    assert_eq!(store::last_used(&session), Some(1_000));
+    assert_eq!(error.code, "AUTH_EXPIRED");
+    assert!(error.hint.unwrap().contains("--remember-password"));
+    assert!(!asks_the_user(&fixture.sso_paths()[before..]));
+    // The ended SSO session is dropped, so the next attempt skips it.
+    assert!(!fixture.session().contains("JSESSIONID"));
+}
+
+#[test]
+fn concurrent_renewals_sign_in_once_and_share_the_new_session() {
+    let fixture = Fixture::expired();
+    let acs_posts = || {
+        fixture
+            .dooray
+            .requests()
+            .iter()
+            .filter(|line| line.contains(ACS))
+            .count()
+    };
+    let before = acs_posts();
+
+    let headers: Vec<_> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4).map(|_| scope.spawn(|| fixture.renew())).collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap().header)
+            .collect()
+    });
+    assert_eq!(headers, ["SESSION=authed2"; 4]);
+    assert_eq!(acs_posts(), before + 1);
+    let session: serde_json::Value = serde_json::from_str(&fixture.session()).unwrap();
+    assert_eq!(session["cookies"][0]["value"], "authed2");
+}
+
+#[test]
+fn a_password_kaist_refuses_is_never_resent_by_renewal() {
+    for (code, hint) in [
+        ("EAU001", "--remember-password"),
+        ("SS0006", "in a browser"),
+    ] {
+        let fixture = Fixture::expired();
+        fixture.state.sso_alive.store(false, Ordering::SeqCst);
+        fixture.remember_password();
+        *fixture.password_result.lock().unwrap() = format!(r#"{{"result_code":"{code}"}}"#);
+
+        let error = fixture.renew().err().unwrap();
+        assert_eq!(error.code, "AUTH_EXPIRED", "{code}");
+        assert!(error.hint.unwrap().contains(hint), "{code}");
+        let before = fixture.sso_paths().len();
+        assert_eq!(fixture.renew().err().unwrap().code, "AUTH_EXPIRED");
+        let paths = &fixture.sso_paths()[before..];
+        assert!(
+            !paths.iter().any(|path| path == "/auth/user/login/auth"),
+            "{code}: {paths:?}"
+        );
     }
 }

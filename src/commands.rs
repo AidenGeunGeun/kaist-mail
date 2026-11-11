@@ -11,6 +11,12 @@ use crate::{
 };
 
 pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
+    let mut result = dispatch(cli)?;
+    result.warnings.extend(auth::take_notes());
+    Ok(result)
+}
+
+fn dispatch(cli: &Cli) -> Result<CommandResult, AppError> {
     let base = validate_base_url(&cli.base_url)?;
     match &cli.command {
         Command::Auth(AuthCommand::Login(args)) => {
@@ -30,6 +36,8 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             let human = status_text(&status);
             output::result("auth.status", &status, human)
         }
+        Command::Auth(AuthCommand::Extend) => auth::extend(&base, cli.timeout),
+        Command::Auth(AuthCommand::Renew) => auth::renew_now(&base, cli.timeout),
         Command::Folders => folders(&Client::new(base, cli.timeout)?),
         Command::List(args) => crate::query::list(&Client::new(base, cli.timeout)?, args),
         Command::Search(args) => crate::query::search(&Client::new(base, cli.timeout)?, args),
@@ -68,14 +76,14 @@ fn status_text(status: &AuthStatus) -> String {
     if let Some(created) = status.created_at {
         lines.push(format!(
             "Saved: {} ago",
-            duration(now.saturating_sub(created))
+            output::duration(now.saturating_sub(created))
         ));
     }
     for cookie in &status.cookies {
         let expiry = match cookie.expires_at {
             None => "until Dooray ends the session".to_owned(),
             Some(_) if cookie.expired => "expired".to_owned(),
-            Some(at) => format!("expires in {}", duration(at - now)),
+            Some(at) => format!("expires in {}", output::duration(at - now)),
         };
         lines.push(format!("Cookie {}: {expiry}", cookie.name));
     }
@@ -98,16 +106,10 @@ fn status_text(status: &AuthStatus) -> String {
         (None, Some(error)) => lines.push(format!("Remembered login unreadable: {error}")),
         (None, None) => {}
     }
-    lines.join("\n")
-}
-
-fn duration(seconds: u64) -> String {
-    match seconds {
-        0..120 => format!("{seconds}s"),
-        120..7_200 => format!("{}m", seconds / 60),
-        7_200..172_800 => format!("{}h", seconds / 3_600),
-        _ => format!("{}d", seconds / 86_400),
+    if status.configured {
+        lines.extend(status.renewal.lines(now));
     }
+    lines.join("\n")
 }
 
 #[derive(Deserialize)]

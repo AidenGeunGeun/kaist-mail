@@ -93,6 +93,7 @@ impl io::Read for Response {
     }
 }
 
+#[derive(Clone)]
 pub struct Payload {
     pub content_type: &'static str,
     pub bytes: Vec<u8>,

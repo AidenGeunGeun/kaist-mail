@@ -39,7 +39,8 @@ Safety:
   message read, as opening it in Dooray does (JSON marked_read says whether this
   call changed it); `list`, `search`, `export` and all other commands leave read
   state alone. Downloads never overwrite a file. Session cookies go only to
-  https://kaist.gov-dooray.com. `auth status` is secret-free. Never ask
+  https://kaist.gov-dooray.com, KAIST SSO's only to https://sso.kaist.ac.kr.
+  `auth status` is secret-free. Never ask
   for or accept a password in chat: new passwords use hidden terminal prompts. The
   agent sign-in flow needs the six-digit code KAIST sends by email or SMS; ask the
   user for that code only.";
@@ -332,9 +333,21 @@ pub enum AuthCommand {
     /// Report non-secret session metadata and the remembered login (no network).
     #[command(
         long_about = "Report the saved session (path, creation time, cookie names with their expiry, trusted-device count) and the remembered login (user, method, second factor, whether a password is in the keychain). Cookie values and passwords are never printed. This reads local files only; `kaist-mail folders` proves the session still works.",
-        after_help = "Example:\n  kaist-mail --json auth status"
+        after_help = "JSON data also carries renewal: {available: [sso-session|password], last_used_at, longest_idle_accepted, last: {at, via, dooray_rejected_after?, sso?: {idle, alive}}}.\n\nExample:\n  kaist-mail --json auth status"
     )]
     Status,
+    /// Keep the saved session alive with one cheap Dooray call.
+    #[command(
+        long_about = "Make one cheap Dooray call that Dooray counts as activity, which restarts its idle timer. Run it on a schedule (cron, launchd) to keep the session from idling out. If Dooray has already ended the session it is renewed as for any command.",
+        after_help = "JSON data: {renewed}.\n\nExample:\n  kaist-mail --json auth extend"
+    )]
+    Extend,
+    /// Replace the session now without the user, as a rejected one would be.
+    #[command(
+        long_about = "Get a new Dooray session without prompting: from the saved KAIST SSO session, else by password login with the remembered password from a device KAIST trusts. Never starts Easy Login or sends a verification code. Use it to check that renewal works.",
+        after_help = "JSON data: {via: sso-session|password}.\n\nExample:\n  kaist-mail --json auth renew"
+    )]
+    Renew,
 }
 
 const LOGIN_HELP: &str = "\
@@ -342,9 +355,18 @@ How it works:
   Dooray (kaist.gov-dooray.com) asks KAIST SSO to sign you in with SAML. The
   CLI follows the same pages a browser does: Dooray's sign-in entry, KAIST SSO
   (Easy Login, or password plus an email/SMS code), then hands the SAML answer
-  back to Dooray, checks that Dooray now answers as signed in, and keeps only
-  Dooray's SESSION cookie, in a private file
+  back to Dooray, checks that Dooray now answers as signed in, and keeps
+  Dooray's SESSION cookie and KAIST SSO's own session cookies in a private file
   ($XDG_STATE_HOME/kaist-mail/session.json, or ~/.local/state/kaist-mail).
+
+Staying signed in:
+  When Dooray rejects the session, any command renews it once without asking
+  and retries, saying so in warnings: first with the saved KAIST SSO session
+  (as a browser still signed in to KAIST does), then, with a remembered
+  password, by a password login that KAIST lets through without a code on a
+  device it trusts. Renewal never starts Easy Login, sends a code or prompts.
+  When neither works the command fails with AUTH_EXPIRED and a hint.
+  `kaist-mail auth extend` on a schedule keeps the session from idling out.
 
 Remembered login:
   After a successful sign-in the KAIST ID, method and second factor are kept in

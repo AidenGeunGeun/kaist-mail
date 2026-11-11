@@ -49,6 +49,10 @@ impl SsoTransport {
         &self.dooray
     }
 
+    pub fn sso(&self) -> &Url {
+        &self.sso
+    }
+
     pub fn document_url(&self) -> Option<&Url> {
         self.document_url.as_ref()
     }

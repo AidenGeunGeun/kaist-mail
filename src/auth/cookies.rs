@@ -57,7 +57,8 @@ struct Cookie {
 }
 
 /// Cookies set during one login, plus trusted-device identifiers. It is also
-/// the on-disk form inside a pending login (re-checked by [`Jar::checked`]).
+/// the on-disk form inside a pending login and of the saved KAIST SSO session
+/// (re-checked by [`Jar::checked`]).
 #[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jar {
     cookies: Vec<Cookie>,
@@ -218,6 +219,24 @@ impl Jar {
         result.sort_by(|a, b| a.name.cmp(&b.name));
         result.dedup_by(|a, b| a.name == b.name);
         result
+    }
+
+    /// The cookies KAIST SSO itself set, its login session among them: kept
+    /// so a later SAML request is answered without credentials. Only the
+    /// sign-in transport sends them, and it reaches no other host in their domain.
+    pub fn sso_session(&self, sso: &Url) -> Jar {
+        let origin = sso.origin().ascii_serialization();
+        Jar {
+            cookies: (self.cookies.iter())
+                .filter(|cookie| cookie.source_origin == origin)
+                .cloned()
+                .collect(),
+            devices: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cookies.is_empty()
     }
 
     pub fn device_values(&self) -> Vec<String> {
