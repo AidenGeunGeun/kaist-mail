@@ -1,6 +1,7 @@
 //! The real binary against a loopback Dooray, with synthetic sessions and
 //! mail data only.
 
+mod read;
 #[allow(dead_code)]
 #[path = "../fixture/server.rs"]
 mod server;

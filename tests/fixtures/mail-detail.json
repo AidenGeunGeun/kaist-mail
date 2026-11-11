@@ -1,0 +1,243 @@
+{
+  "header": {
+    "resultCode": 0,
+    "resultMessage": "",
+    "isSuccessful": true
+  },
+  "result": {
+    "references": {
+      "folderMap": {
+        "3100000000000000001": {
+          "id": "3100000000000000001",
+          "name": "inbox",
+          "type": "system"
+        }
+      },
+      "classifiedMap": {
+        "academic@kaist.ac.kr": {
+          "type": "distribution_list",
+          "distributionList": {
+            "id": "3200000000000000001",
+            "name": "학사팀",
+            "emailAddress": "academic@kaist.ac.kr",
+            "itemCount": 37
+          },
+          "restrictedDistributionList": null,
+          "emailUser": null,
+          "member": null,
+          "projectMail": null,
+          "channelMail": null,
+          "forwardOnlyMember": null,
+          "sharedMailMember": null
+        },
+        "gildong@kaist.ac.kr": {
+          "type": "member",
+          "distributionList": null,
+          "restrictedDistributionList": null,
+          "emailUser": null,
+          "member": {
+            "id": "3000000000000000001",
+            "name": "홍길동",
+            "emailAddress": "gildong@kaist.ac.kr",
+            "tenantMemberRole": "member",
+            "nickname": null,
+            "organizationId": 3000000000000000000
+          },
+          "projectMail": null,
+          "channelMail": null,
+          "forwardOnlyMember": null,
+          "sharedMailMember": null
+        }
+      }
+    },
+    "content": {
+      "createdAt": "2026-11-12T09:41:07+09:00",
+      "updatedAt": "2026-11-12T09:41:07+09:00",
+      "subject": "[학사] 2026학년도 봄학기 수강신청 안내",
+      "mail": {
+        "messageId": "4461111111111111111",
+        "priority": 3,
+        "sentAt": "2026-11-12T09:40:55+09:00",
+        "toBeSentAt": null,
+        "toBeSentTimezone": null,
+        "security": {
+          "level": "normal",
+          "resend": false,
+          "retentionDays": null,
+          "toBeDeletedAt": null,
+          "autoDelete": false
+        },
+        "receipts": null,
+        "mimeSize": 182345,
+        "saveReason": {
+          "code": null,
+          "category": null
+        },
+        "rcptTo": "gildong@kaist.ac.kr",
+        "senderIp": "203.0.113.10",
+        "countryCode": "KR",
+        "flags": {
+          "opened": false,
+          "replied": false,
+          "forwarded": false,
+          "sent": false,
+          "calendar": false,
+          "dmarc": false,
+          "delayed": false,
+          "scheduled": false,
+          "canceled": false,
+          "smtpForwarded": false,
+          "securityEditable": false,
+          "individualSend": false,
+          "tnef": false,
+          "reportHacking": false,
+          "dkimPass": true,
+          "approve": false,
+          "auditSecurity": false,
+          "deleted": false,
+          "read": false,
+          "draft": false,
+          "favorite": false
+        }
+      },
+      "securityEditable": false,
+      "individualSend": false,
+      "threadMail": {
+        "id": null,
+        "type": "single"
+      },
+      "isEmailOfTenant": true,
+      "internalMail": true,
+      "approval": null,
+      "showImage": true,
+      "id": "4460000000000000001",
+      "originMailId": "4460000000000000001",
+      "uid": "91234",
+      "folderId": "3100000000000000001",
+      "users": {
+        "from": {
+          "type": "emailUser",
+          "emailUser": {
+            "name": "학사팀",
+            "emailAddress": "academic@kaist.ac.kr"
+          }
+        },
+        "envFrom": {
+          "type": "emailUser",
+          "emailUser": {
+            "name": "학사팀",
+            "emailAddress": "academic@kaist.ac.kr"
+          }
+        },
+        "froms": [
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "학사팀",
+              "emailAddress": "academic@kaist.ac.kr"
+            }
+          }
+        ],
+        "to": [
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "홍길동",
+              "emailAddress": "gildong@kaist.ac.kr"
+            }
+          }
+        ],
+        "cc": [
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "교수1",
+              "emailAddress": "prof1@kaist.ac.kr"
+            }
+          },
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "교수2",
+              "emailAddress": "prof2@kaist.ac.kr"
+            }
+          },
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "교수3",
+              "emailAddress": "prof3@kaist.ac.kr"
+            }
+          },
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "교수4",
+              "emailAddress": "prof4@kaist.ac.kr"
+            }
+          },
+          {
+            "type": "emailUser",
+            "emailUser": {
+              "name": "교수5",
+              "emailAddress": "prof5@kaist.ac.kr"
+            }
+          }
+        ],
+        "bcc": [],
+        "replyTo": [],
+        "more": null,
+        "toMore": false,
+        "ccMore": false,
+        "bccMore": false
+      },
+      "body": {
+        "mimeType": "text/html",
+        "content": "<style>p{color:red}</style><div style=\"font-family:'맑은 고딕';\"><p>안녕하세요, 학사팀입니다.</p><div><br></div><div><br></div><div><br></div><p>2026학년도 봄학기 수강신청 일정을 다음과 같이 안내드립니다. 신청은 <a href=\"https://portal.kaist.ac.kr/apply?term=2026-1\">포털</a>에서 하세요.</p><ol><li>예비수강신청: 1월 20일(화) 10:00 ~ 1월 22일(목) 17:00</li><li>본수강신청: 2월 10일(화) 10:00 ~ 2월 12일(목) 17:00</li></ol><table><tr><td>문의</td><td><a href=\"mailto:academic@kaist.ac.kr\">academic@kaist.ac.kr</a></td></tr></table><img src=\"cid:poster\" alt=\"수강신청 포스터\"><script>track()</script><p>Please see the attached files for details.</p></div><blockquote><div>2026년 11월 10일 (화) 오후 3:00, 교무처 &lt;registrar@kaist.ac.kr&gt; 작성:</div><div>원문: 일정 확정 부탁드립니다.</div></blockquote>",
+        "showImage": true
+      },
+      "annotations": {
+        "favorited": false
+      },
+      "fileList": [
+        {
+          "mimeType": "application/pdf",
+          "name": "2026학년도 봄학기 수강신청 안내.pdf",
+          "size": 152031,
+          "downloadUrl": "/mails/4460000000000000001/parts/3?type=raw&t=1794400000000000000",
+          "extension": "pdf",
+          "forbiddenExtensionFlag": false,
+          "partNumber": 3,
+          "bigfile": false,
+          "driveLink": false,
+          "deleted": false,
+          "encrypted": false,
+          "messagePartId": "4462222222222222221",
+          "createdAt": "2026-11-12T09:41:07+09:00",
+          "toBeDeletedAt": null,
+          "deletedAt": null,
+          "id": null
+        },
+        {
+          "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "name": "Course registration guide (EN).docx",
+          "size": 28417,
+          "downloadUrl": "/mails/4460000000000000001/parts/4?type=raw&t=1794400000000000000",
+          "extension": "docx",
+          "forbiddenExtensionFlag": false,
+          "partNumber": 4,
+          "bigfile": false,
+          "driveLink": false,
+          "deleted": false,
+          "encrypted": false,
+          "messagePartId": "4462222222222222222",
+          "createdAt": "2026-11-12T09:41:07+09:00",
+          "toBeDeletedAt": null,
+          "deletedAt": null,
+          "id": null
+        }
+      ],
+      "relation": null
+    }
+  }
+}

@@ -2,12 +2,15 @@ mod auth;
 mod cli;
 mod client;
 mod commands;
+mod download;
 mod error;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/fixture/server.rs"]
 mod fixture_server;
+mod html_text;
 mod http;
+mod message;
 mod output;
 mod private_fs;
 mod url;

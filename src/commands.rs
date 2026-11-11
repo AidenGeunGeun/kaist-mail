@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::{self, AuthStatus, LoginOptions},
     cli::{AuthCommand, Cli, Command},
-    client::{Client, SYSTEM_FOLDERS, USER_FOLDERS, validate_base_url},
+    client::{Client, Limits, SYSTEM_FOLDERS, USER_FOLDERS, validate_base_url},
+    download,
     error::AppError,
+    message,
     output::{self, CommandResult, ListMeta},
 };
 
@@ -29,6 +31,28 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             output::result("auth.status", &status, human)
         }
         Command::Folders => folders(&Client::new(base, cli.timeout)?),
+        Command::Read(args) => {
+            let options = message::ReadOptions {
+                offset: args.offset,
+                max_chars: args.max_chars,
+                recipients: args.recipients,
+            };
+            message::read(&Client::new(base, cli.timeout)?, &args.id, &options)
+        }
+        Command::Download(args) => {
+            let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
+            let client = Client::new(base, cli.timeout)?;
+            download::attachments(&client, &args.id, &args.parts, &args.out, limits)
+        }
+        Command::Export(args) => {
+            let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
+            download::eml(
+                &Client::new(base, cli.timeout)?,
+                &args.id,
+                &args.out,
+                limits,
+            )
+        }
     }
 }
 
