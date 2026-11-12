@@ -62,14 +62,23 @@ impl FromStr for Folder {
     }
 }
 
-/// A search term in NFC (Dooray matches nothing for decomposed Hangul) and
-/// under Dooray's length limit, which it reports as error -13207002.
-pub fn term(value: &str) -> Result<String, String> {
-    let term = ComposingNormalizerBorrowed::new_nfc()
+/// Text to look for, trimmed and in NFC: Dooray matches nothing for
+/// decomposed Hangul, and `read` shows bodies composed.
+pub fn needle(value: &str) -> Result<String, String> {
+    let needle = ComposingNormalizerBorrowed::new_nfc()
         .normalize(value.trim())
         .into_owned();
+    if needle.is_empty() {
+        return Err("the text to look for must not be empty".into());
+    }
+    Ok(needle)
+}
+
+/// A search term: a `needle` under Dooray's length limit, which it reports
+/// as error -13207002.
+pub fn term(value: &str) -> Result<String, String> {
+    let term = needle(value)?;
     match term.chars().count() {
-        0 => Err("search terms must not be empty".into()),
         100.. => Err("Dooray accepts search terms of at most 99 characters".into()),
         _ => Ok(term),
     }
