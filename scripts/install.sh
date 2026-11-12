@@ -81,9 +81,10 @@ main() {
   if [[ -L "$destination" || (-e "$destination" && ! -f "$destination") ]]; then
     die "$destination exists and is not a regular file; remove it and run the installer again"
   fi
-  # BSD install writes a private temporary file beside the target and renames it over the target,
-  # so a symlink planted at that name is replaced, never followed. GNU install on PATH does not.
-  /usr/bin/install -m 0755 "$work_dir/kaist-mail" "$destination"
+  # BSD install writes a private temporary file beside the target and renames it over the target, so a
+  # symlink planted at that name is replaced, never followed. GNU install on PATH does not. The directory
+  # operand matters: a file operand that became a symlink to a directory would be resolved into it.
+  /usr/bin/install -m 0755 "$work_dir/kaist-mail" "$install_dir/"
   if [[ -L "$destination" || ! -f "$destination" ]]; then
     die "$destination was replaced by something else during the install"
   fi
