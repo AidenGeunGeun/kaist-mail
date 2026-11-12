@@ -22,7 +22,7 @@ What kaist-mail can do now, what is proven live, and what comes next.
 | Session renewal without the phone (SSO session, remembered password) | yes | no |
 | `list`, `search` (thin rows, cursors past the 2000-hit cap) | yes | yes |
 | `read` (bounded text, `--find` window, marks read), `download`, `export` (leaves unread) | yes | yes, small files (`--find` synthetic only) |
-| Release archive, checksum, `scripts/install.sh` (Apple Silicon) | yes | local smoke only; no release published |
+| Release archive, checksum, `scripts/install.sh` (Apple Silicon) | yes | v0.1.0 published; `curl | bash` install verified |
 | Large transfers (several MB) | yes: up to 5 whole attempts within --max-seconds | yes, EML to 30 MB, attachment 13.9 MB |
 
 ## Next
