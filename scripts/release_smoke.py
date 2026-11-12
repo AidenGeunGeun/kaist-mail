@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 CHECKOUT = Path(__file__).resolve().parent.parent
 FIXTURES = CHECKOUT / "tests" / "fixtures"
+INSTALLER = CHECKOUT / "scripts" / "install.sh"
 MAIL_ID = "4460000000000000001"
 JSON = "application/json;charset=UTF-8"
 
@@ -36,15 +37,20 @@ def run(
 
 
 def install(
-    releases: Path, version: str, home: Path, cwd: Path, success: bool = True
+    releases: str,
+    version: str,
+    home: Path,
+    cwd: Path,
+    success: bool = True,
+    script: Path = INSTALLER,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(home),
-        "KAIST_MAIL_RELEASES": releases.as_uri(),
+        "KAIST_MAIL_RELEASES": releases,
         "KAIST_MAIL_VERSION": version,
     }
-    return run(["bash", str(CHECKOUT / "scripts" / "install.sh")], env, cwd, success)
+    return run(["bash", str(script)], env, cwd, success)
 
 
 def mirror(root: Path, archive: Path, version: str, corrupt: bool = False) -> Path:
@@ -85,7 +91,10 @@ def fixture_server() -> tuple[ThreadingHTTPServer, dict[int, bytes], list[str]]:
                 kind = parse_qs(url.query)["type"][0]
                 body = (FIXTURES / f"mail-folders-{kind}.json").read_bytes()
             elif url.path == "/v2/wapi/mails":
-                body = (FIXTURES / "mails-list.json").read_bytes()
+                page = json.loads((FIXTURES / "mails-list.json").read_bytes())
+                size = int(parse_qs(url.query)["size"][0])
+                page["result"]["contents"] = page["result"]["contents"][:size]
+                body = json.dumps(page).encode()
             elif url.path == f"/v2/wapi/mails/{MAIL_ID}":
                 body = detail
             elif url.path in attachments:
@@ -119,20 +128,45 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="kaist-mail-smoke-") as directory:
         root = Path(directory)
 
-        tampered_home = root / "tampered-home"
-        tampered = mirror(root / "tampered", archive, version, corrupt=True)
-        rejected = install(tampered, version, tampered_home, root, success=False)
-        if "checksum verification failed" not in rejected.stderr:
-            raise SystemExit(
-                f"corrupted archive rejected for another reason:\n{rejected.stderr}"
-            )
-        if (tampered_home / ".local" / "bin" / "kaist-mail").exists():
+        releases = mirror(root / "releases", archive, version).as_uri()
+        tampered = mirror(root / "tampered", archive, version, corrupt=True).as_uri()
+
+        def refused(case: str, releases: str, reason: str) -> Path:
+            """Run the installer in a fresh HOME, expecting it to refuse for `reason`."""
+            home = root / case
+            result = install(releases, version, home, root, success=False)
+            if reason not in result.stderr:
+                raise SystemExit(
+                    f"{case}: refused for another reason:\n{result.stderr}"
+                )
+            return home / ".local" / "bin" / "kaist-mail"
+
+        if refused("tampered", tampered, "checksum verification failed").exists():
             raise SystemExit("installer left a binary from a corrupted archive")
+        for case, url in [
+            ("plain-http", "http://github.com/AidenGeunGeun/kaist-mail/releases"),
+            ("loopback-userinfo", "http://127.0.0.1:80@github.com/releases"),
+        ]:
+            _ = refused(case, url, "must be https://")
+        (root / "directory" / ".local" / "bin" / "kaist-mail").mkdir(parents=True)
+        _ = refused("directory", releases, "is not a regular file")
+        victim = root / "symlink" / "victim"
+        victim.parent.mkdir()
+        _ = victim.write_text("victim")
+        (root / "symlink" / ".local" / "bin").mkdir(parents=True)
+        (root / "symlink" / ".local" / "bin" / "kaist-mail").symlink_to(victim)
+        _ = refused("symlink", releases, "is not a regular file")
+        if victim.read_text() != "victim":
+            raise SystemExit("installer wrote through a symlink")
+
+        truncated = root / "truncated.sh"
+        _ = truncated.write_text(INSTALLER.read_text().rstrip("\n").rsplit("\n", 1)[0])
+        partial = install(releases, version, root / "truncated", root, script=truncated)
+        if partial.stdout or partial.stderr or (root / "truncated").exists():
+            raise SystemExit("a truncated installer did something")
 
         home = root / "home"
-        installed = install(
-            mirror(root / "releases", archive, version), version, home, root
-        )
+        installed = install(releases, version, home, root)
         if "is not on your PATH" not in installed.stdout:
             raise SystemExit(
                 f"installer did not report the missing PATH entry:\n{installed.stdout}"
@@ -187,16 +221,18 @@ def main() -> None:
             folders = envelope("folders", extra=dooray)[0]["data"]
             if not any(f["name"] == "inbox" for f in folders):
                 raise SystemExit("folders: no inbox")
-            rows = envelope("list", "--limit", "3", extra=dooray)[0]["data"]
-            if rows[0]["id"] != MAIL_ID:
-                raise SystemExit("list: first row is not the fixture message")
+            listed = json.loads((FIXTURES / "mails-list.json").read_bytes())
+            rows = envelope("list", "--limit", "2", extra=dooray)[0]["data"]
+            if [r["id"] for r in rows] != [
+                m["id"] for m in listed["result"]["contents"][:2]
+            ]:
+                raise SystemExit("list --limit 2: wrong rows")
             message = envelope("read", MAIL_ID, extra=dooray)[0]["data"]
-            if not (
-                message["subject"]
-                and message["body"]["text"]
-                and message["marked_read"] is True
-            ):
-                raise SystemExit("read: missing subject, body or marked_read")
+            if (message["subject"], message["marked_read"]) != (
+                "[학사] 2026학년도 봄학기 수강신청 안내",
+                True,
+            ) or "안녕하세요, 학사팀입니다." not in message["body"]["text"]:
+                raise SystemExit("read: wrong subject, body or marked_read")
             out = root / "다운로드"
             out.mkdir()
             saved = envelope("download", MAIL_ID, "--out", str(out), extra=dooray)[0][
