@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["tiktoken==0.12.0"]
 # ///
 """What realistic mail tasks cost an agent using kaist-mail.
@@ -15,6 +15,7 @@ binary moved over HTTP.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -29,8 +30,8 @@ from pathlib import Path
 
 import tiktoken
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import dooray
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench import dooray
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKENIZER = "o200k_base"
@@ -220,7 +221,7 @@ def downloaded(files: list[dooray.Json]) -> object:
     for file in files:
         path = Path(file["path"])
         if path.name == "연구실안전교육_이수증_2023.pdf":
-            return path.name, path.stat().st_size
+            return path.name, hashlib.sha256(path.read_bytes()).hexdigest()
     return None
 
 
@@ -468,8 +469,8 @@ def help_cost(binary: Path) -> list[tuple[str, int, int]]:
 def table(results: list[Result], latency_ms: int) -> str:
     lines = [
         f"Tokens: tiktoken {TOKENIZER} over the complete stdout+stderr of every command (cmd tok: the command lines the agent writes).",
-        "Upstream: HTTP request+response bytes on the loopback (kaist-mail sends no Accept-Encoding, so bodies are uncompressed).",
-        f"Time: local wall time of all commands; 'at {latency_ms} ms' adds that fixed delay to every HTTP response in a second run.",
+        "Upstream: HTTP bytes on the loopback wire, both directions, framing and headers included (kaist-mail sends no Accept-Encoding, so bodies are uncompressed).",
+        f"Time: local wall time of all commands; 'at {latency_ms} ms' adds that fixed delay to every HTTP response in a second run, and ok requires both runs to answer correctly.",
         "",
         f"| task | workflow | ok | cmds | reqs | upstream KB | out bytes | out tok | cmd tok | local s | at {latency_ms} ms s |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
@@ -508,9 +509,10 @@ def main() -> None:
             correct, steps = measure(args.binary, workflow, task.answer(truth), 0.0)
             late = None
             if args.latency_ms:
-                _, slow = measure(
+                slow_correct, slow = measure(
                     args.binary, workflow, task.answer(truth), args.latency_ms / 1000
                 )
+                correct = correct and slow_correct
                 late = sum(step.seconds for step in slow)
             results.append(Result(task.name, name, correct, steps, late))
             if args.steps:

@@ -4,17 +4,20 @@ Dooray does. Response items are the test fixtures' items with the synthetic
 values put in, so their byte sizes match Dooray's."""
 
 import copy
+import hashlib
 import html
+import io
 import json
 import random
 import re
 import threading
 import time
+from collections.abc import Buffer
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 from urllib.parse import parse_qs, urlsplit
 
 Json = dict[str, Any]
@@ -42,6 +45,14 @@ class Attachment:
     name: str
     size: int
     mime: str
+
+    @property
+    def payload(self) -> bytes:
+        return random.Random(self.name).randbytes(self.size)
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.payload).hexdigest()
 
 
 @dataclass
@@ -465,7 +476,7 @@ class Truth:
 
     orientation_room: str
     classroom: str
-    certificate: tuple[str, int]
+    certificate: tuple[str, str]
     enrollment_years: str
     triage_ids: set[str]
     academic_unread: int
@@ -756,10 +767,13 @@ def generate() -> tuple[list[Mail], Truth]:
         (m for m in mails if m.folder == "inbox" and not m.read),
         key=lambda m: -m.received,
     )[:50]
+    certificate = next(
+        f for m in mails for f in m.files if f.name == "연구실안전교육_이수증_2023.pdf"
+    )
     truth = Truth(
         orientation_room="KI Building (E4) Room 412",
         classroom="E11 #305",
-        certificate=("연구실안전교육_이수증_2023.pdf", 131_072 + 2023),
+        certificate=(certificate.name, certificate.digest),
         enrollment_years="8년",
         triage_ids={m.id for m in newest_unread if REQUEST.search(m.text)},
         academic_unread=sum(
@@ -897,7 +911,11 @@ class Mailbox:
             sender = " ".join(m.sender)
             to = " ".join(" ".join(t) for t in m.to)
             files = " ".join(f.name for f in m.files)
-            folders = body.get("folderNames")
+            folders = body.get("folderNames") or [
+                name
+                for name, id in FOLDER_IDS.items()
+                if id in body.get("folderIds", [])
+            ]
             return (
                 (
                     m.folder in folders
@@ -1006,6 +1024,41 @@ class Exchange:
     received: int
 
 
+class Counted(io.BufferedIOBase):
+    """A handler's socket stream that counts the bytes crossing it."""
+
+    def __init__(self, stream: io.BufferedIOBase) -> None:
+        super().__init__()
+        self.stream = stream
+        self.bytes = 0
+
+    @override
+    def read(self, size: int | None = -1) -> bytes:
+        data = self.stream.read(size)
+        self.bytes += len(data)
+        return data
+
+    @override
+    def readline(self, size: int | None = -1) -> bytes:
+        data = self.stream.readline(size)
+        self.bytes += len(data)
+        return data
+
+    @override
+    def write(self, data: Buffer) -> int:
+        self.bytes += len(memoryview(data))
+        return self.stream.write(data)
+
+    @override
+    def flush(self) -> None:
+        self.stream.flush()
+
+    def take(self) -> int:
+        """The bytes counted since the last take."""
+        counted, self.bytes = self.bytes, 0
+        return counted
+
+
 class Server:
     """Serves `mailbox` on a loopback port and records every exchange."""
 
@@ -1016,6 +1069,11 @@ class Server:
         bench = self
 
         class Handler(BaseHTTPRequestHandler):
+            @override
+            def setup(self) -> None:
+                super().setup()
+                self.rfile, self.wfile = Counted(self.rfile), Counted(self.wfile)
+
             def do_GET(self) -> None:
                 self.answer(b"")
 
@@ -1031,10 +1089,9 @@ class Server:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-                head = len(self.requestline) + sum(
-                    len(k) + len(v) + 4 for k, v in self.headers.items()
-                )
-                bench.log.append(Exchange(head + len(request), len(body)))
+                incoming, outgoing = self.rfile, self.wfile
+                assert isinstance(incoming, Counted) and isinstance(outgoing, Counted)
+                bench.log.append(Exchange(incoming.take(), outgoing.take()))
 
             def log_message(self, format: str, *args: object) -> None:
                 pass
@@ -1072,5 +1129,5 @@ class Server:
             return 200, json_type, self.mailbox.detail(self.mailbox.by_id[m[1]])
         if m := re.fullmatch(r"/mails/(\d+)/parts/(\d+)", url.path):
             file = self.mailbox.by_id[m[1]].files[int(m[2]) - 2]
-            return 200, file.mime, bytes(i * 31 % 251 for i in range(file.size))
+            return 200, file.mime, file.payload
         return 404, "text/plain", b"not found"
