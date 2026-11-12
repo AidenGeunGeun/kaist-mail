@@ -41,14 +41,7 @@ fn dispatch(cli: &Cli) -> Result<CommandResult, AppError> {
         Command::Folders => folders(&Client::new(base, cli.timeout)?),
         Command::List(args) => crate::query::list(&Client::new(base, cli.timeout)?, args),
         Command::Search(args) => crate::query::search(&Client::new(base, cli.timeout)?, args),
-        Command::Read(args) => {
-            let options = mail::ReadOptions {
-                offset: args.offset,
-                max_chars: args.max_chars,
-                recipients: args.recipients,
-            };
-            mail::read(&Client::new(base, cli.timeout)?, &args.id, &options)
-        }
+        Command::Read(args) => mail::read(&Client::new(base, cli.timeout)?, args),
         Command::Download(args) => {
             let limits = Limits::new(args.transfer.max_seconds, args.transfer.stall_seconds);
             let client = Client::new(base, cli.timeout)?.until(Some(limits.deadline));

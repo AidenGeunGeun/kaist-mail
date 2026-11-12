@@ -8,11 +8,20 @@ const TOP_HELP: &str = "Workflow:
   kaist-mail auth login                 # interactive; passwords are never flags
   kaist-mail --json folders             # overview: every folder's unread and total counts
   kaist-mail --json list --unread       # newest unread inbox rows, 20 at a time
-  kaist-mail --json search --from 학사팀 --since 2026-09-01   # find mail anywhere
+  kaist-mail --json search CS492 --from 학사팀   # find mail anywhere by what it says
+  kaist-mail --json search --body 재학연한 --since 2026-01-01   # words only the body has
+  kaist-mail --json search --unread --from 학사팀 --limit 1   # a count: meta.total
   ... --cursor <meta.next_cursor>       # continue a list or search after its last row
   kaist-mail --json read ID             # one message as text (marks it read)
+  kaist-mail --json read ID --find 재학연한 --max-chars 400   # just the part holding a word
   kaist-mail --json download ID --out DIR   # its attachments as new private files
   kaist-mail --json export ID --out DIR     # the raw .eml; leaves it unread
+
+Fewest calls: reading bodies costs far more than rows. When the answer is in a
+body, put a word you expect there into the search (a bare TERM matches any field,
+--body only the body) instead of reading look-alike subjects one by one, and
+read --find a word next to the answer instead of paging a long body. --preview
+makes each row two to three times as long; use it when first lines decide.
 
 JSON contract (put global --json before the command):
   stdout on success: {schema_version, ok:true, command, data, warnings, meta?}
@@ -105,7 +114,7 @@ pub enum Command {
     /// Read one message as text (marks it read, as opening it in Dooray does).
     #[command(
         long_about = "Fetch one message and print its headers, attachments and body as plain text. Dooray's HTML body is rendered with quotes kept as `> ` lines, links as `text <url>`, images as their alt text, and each table cell on its own line. Fetching the message marks it read on Dooray, exactly as opening it in the web app does; marked_read says whether this call changed it.",
-        after_help = "Body window: at most --max-chars characters (Unicode scalar values) from --offset. When more text follows, body.next_offset is set; pass it as --offset to continue. Each call fetches the message again.\n\nJSON data: {id, subject, from?, to, cc?, bcc?, reply_to?, more_recipients?, date?, read: true, marked_read, attachments?: [{part, name, size, mime, deleted?}], body: {text, offset, total_chars, next_offset?}}. Recipients are \"Name <address>\" strings, at most 3 per field unless --recipients; more_recipients counts the rest. part is the reference `download --part` takes; size is in bytes.\n\nExamples:\n  kaist-mail read 4237456781234567890\n  kaist-mail --json read 4237456781234567890 --offset 4000 --max-chars 20000"
+        after_help = "Body window: at most --max-chars characters (Unicode scalar values) from --offset. When more text follows, body.next_offset is set; pass it as --offset to continue. Each call fetches the message again. Text is in NFC.\n\n--find reads a fact deep in a long body in one small call. The window starts at the match itself when its line starts too far back to fit. For the next match, pass body.next_offset as --offset with the same --find. No match: text is empty and offset equals total_chars.\n\nJSON data: {id, subject, from?, to, cc?, bcc?, reply_to?, more_recipients?, date?, read: true, marked_read, attachments?: [{part, name, size, mime, deleted?}], body: {text, offset, total_chars, next_offset?}}. Recipients are \"Name <address>\" strings, at most 3 per field unless --recipients; more_recipients counts the rest. part is the reference `download --part` takes; size is in bytes.\n\nExamples:\n  kaist-mail read 4237456781234567890\n  kaist-mail --json read 4237456781234567890 --offset 4000 --max-chars 20000\n  kaist-mail --json read 4237456781234567890 --find 재학연한 --max-chars 400"
     )]
     Read(ReadArgs),
     /// Save a message's attachments as new private files (marks the message read).
@@ -131,9 +140,14 @@ pub struct ReadArgs {
     /// The message id `list` or `search` prints.
     pub id: MailId,
 
-    /// First body character to print.
+    /// First body character to print, or with --find, to look from.
     #[arg(long, default_value_t = 0)]
     pub offset: usize,
+
+    /// Start the window at the line holding TEXT's first match at or after
+    /// --offset instead (case-insensitive for ASCII, like search).
+    #[arg(long, value_name = "TEXT", value_parser = crate::query::needle)]
+    pub find: Option<String>,
 
     /// Most body characters to print.
     #[arg(long, default_value_t = 4000, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]

@@ -3,9 +3,11 @@
 
 use std::{fmt, str::FromStr};
 
+use icu_normalizer::ComposingNormalizerBorrowed;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    cli::ReadArgs,
     client::Client,
     error::AppError,
     html_text,
@@ -134,12 +136,6 @@ pub fn fetch(client: &Client, id: &MailId) -> Result<Detail, AppError> {
     Ok(page.content)
 }
 
-pub struct ReadOptions {
-    pub offset: usize,
-    pub max_chars: usize,
-    pub recipients: bool,
-}
-
 #[derive(Serialize)]
 struct Reading<'a> {
     id: String,
@@ -177,18 +173,16 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
-pub fn read(
-    client: &Client,
-    id: &MailId,
-    options: &ReadOptions,
-) -> Result<CommandResult, AppError> {
-    let detail = fetch(client, id)?;
+pub fn read(client: &Client, args: &ReadArgs) -> Result<CommandResult, AppError> {
+    let detail = fetch(client, &args.id)?;
     let text = match detail.body.mime_type.as_str() {
         "text/html" => html_text::to_text(&detail.body.content)?,
         _ => detail.body.content.clone(),
     };
+    // Composed, so `--find` matches what search matches.
+    let text = ComposingNormalizerBorrowed::new_nfc().normalize(&text);
     let users = &detail.users;
-    let limit = if options.recipients {
+    let limit = if args.recipients {
         usize::MAX
     } else {
         SHORT_RECIPIENTS
@@ -203,7 +197,7 @@ pub fn read(
             .collect::<Vec<_>>()
     };
     let reading = Reading {
-        id: id.to_string(),
+        id: args.id.to_string(),
         subject: &detail.subject,
         from: users.from.as_ref().map(User::label),
         to: list(&users.to),
@@ -215,25 +209,57 @@ pub fn read(
         read: true,
         marked_read: detail.marked_read(),
         attachments: &detail.file_list,
-        body: window(&text, options.offset, options.max_chars),
+        body: window(&text, args),
     };
-    let human = human(&reading);
+    let human = human(&reading, args.find.as_deref());
     output::result("read", &reading, human)
 }
 
-fn window(text: &str, offset: usize, max_chars: usize) -> Window {
-    let total_chars = text.chars().count();
-    let text: String = text.chars().skip(offset).take(max_chars).collect();
-    let end = offset.min(total_chars) + text.chars().count();
+fn window(text: &str, args: &ReadArgs) -> Window {
+    let chars: Vec<char> = text.chars().collect();
+    let offset = match &args.find {
+        Some(needle) => found(&chars, args.offset, needle, args.max_chars),
+        None => args.offset,
+    };
+    let text: String = chars.iter().skip(offset).take(args.max_chars).collect();
+    let end = offset.min(chars.len()) + text.chars().count();
     Window {
         text,
         offset,
-        total_chars,
-        next_offset: (end < total_chars).then_some(end),
+        total_chars: chars.len(),
+        next_offset: (end < chars.len()).then_some(end),
     }
 }
 
-fn human(reading: &Reading) -> String {
+/// Where a `--find` window starts: the line holding the first match of
+/// `needle` at or after `from` (but not before `from`), or the match itself
+/// when the match would not fit in `max_chars` from there; the end of the
+/// text when nothing matches.
+fn found(chars: &[char], from: usize, needle: &str, max_chars: usize) -> usize {
+    let needle: Vec<char> = needle.chars().collect();
+    let matches = |window: &[char]| {
+        window
+            .iter()
+            .zip(&needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    };
+    let Some(at) = chars.windows(needle.len()).skip(from).position(matches) else {
+        return chars.len();
+    };
+    let at = from + at;
+    let line = chars[..at]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |newline| newline + 1);
+    let start = line.max(from);
+    if at + needle.len() - start <= max_chars {
+        start
+    } else {
+        at
+    }
+}
+
+fn human(reading: &Reading, find: Option<&str>) -> String {
     let mut lines = vec![format!("Subject: {}", reading.subject)];
     if let Some(from) = &reading.from {
         lines.push(format!("From: {from}"));
@@ -272,6 +298,9 @@ fn human(reading: &Reading) -> String {
     }
     lines.push(String::new());
     lines.push(reading.body.text.clone());
+    if let Some(needle) = find.filter(|_| reading.body.text.is_empty()) {
+        lines.push(format!("[no match for `{needle}` at or after --offset]"));
+    }
     if let Some(next) = reading.body.next_offset {
         lines.push(format!(
             "\n[characters {}-{next} of {}; more: kaist-mail read {} --offset {next}]",

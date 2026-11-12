@@ -136,6 +136,45 @@ fn read_renders_bounded_text_and_reports_that_it_marked_the_message_read() {
 }
 
 #[test]
+fn find_opens_the_body_window_at_the_line_holding_the_next_match() {
+    let home = Home::new(Some(&live()));
+    let decomposed = "\u{1107}\u{1169}\u{11ab}\u{1109}\u{116e}\u{1100}\u{1161}\u{11bc}\u{1109}\u{1175}\u{11ab}\u{110e}\u{1165}\u{11bc}";
+    let server = mailbox(DETAIL.replace("본수강신청", decomposed));
+    let body = |args: &[&str]| {
+        data(&home.run(Some(&server), &[&["--json", "read", ID][..], args].concat()))["body"]
+            .clone()
+    };
+    let text = |args: &[&str]| body(args)["text"].as_str().unwrap().to_owned();
+
+    assert!(
+        text(&["--find", "본수강신청", "--max-chars", "60"])
+            .starts_with("2. 본수강신청: 2월 10일(화) 10:00"),
+        "a decomposed body matches and reads composed"
+    );
+    assert_eq!(
+        text(&["--find", "본수강신청", "--max-chars", "5"]),
+        "본수강신청"
+    );
+    assert!(text(&["--find", "PLEASE SEE"]).starts_with("Please see the attached files"));
+
+    let first = body(&["--find", "수강신청", "--max-chars", "30"]);
+    assert!(
+        first["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026학년도 봄학기 수강신청")
+    );
+    let next = first["next_offset"].to_string();
+    let second = text(&["--find", "수강신청", "--offset", &next, "--max-chars", "30"]);
+    assert!(second.starts_with("1. 예비수강신청"), "{second}");
+
+    let absent = body(&["--find", "없는말"]);
+    assert_eq!(absent["text"], "");
+    assert_eq!(absent["offset"], absent["total_chars"]);
+    assert_eq!(absent.get("next_offset"), None);
+}
+
+#[test]
 fn download_saves_korean_named_private_files_and_never_overwrites() {
     let home = Home::new(Some(&live()));
     let server = mailbox(DETAIL.to_owned());
