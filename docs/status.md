@@ -22,6 +22,7 @@ What kaist-mail can do now, what is proven live, and what comes next.
 | Session renewal without the phone (SSO session, remembered password) | yes | no |
 | `list`, `search` (thin rows, cursors past the 2000-hit cap) | yes | yes |
 | `read` (bounded text, marks read), `download`, `export` (leaves unread) | yes | yes, small files |
+| Release archive, checksum, `scripts/install.sh` (Apple Silicon) | yes | local smoke only; no release published |
 | Large transfers (several MB) | yes: up to 5 whole attempts within --max-seconds | yes, EML to 30 MB, attachment 13.9 MB |
 
 ## Next
@@ -30,8 +31,9 @@ What kaist-mail can do now, what is proven live, and what comes next.
    when Dooray actually rejects an idle session (next day, after sleep), and password renewal (blocked until the
    account's password change, SS0006).
 2. Agent workflow measurements on a synthetic large mailbox: task cost in commands, requests, bytes and tokens.
-3. Installable release: archive, checksum, `install.sh`, release smoke.
-4. Whether KAIST's tenant allows IMAP with a dedicated password (unattended access, whole raw messages).
+3. Tag `v0.1.0` once the workflow measurements land (the archive ships README.md).
+4. IMAP: `imap.gov-dooray.com:993` answers, but Dooray says public institutions get no IMAP and KAIST closed
+   Outlook/iOS Mail access in 2021. Waiting on the user to check Settings -> Mail -> IMAP in the web app.
 
 ## Open questions
 
