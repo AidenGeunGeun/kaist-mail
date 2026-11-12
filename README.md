@@ -37,8 +37,10 @@ kaist-mail read ID                          # one message as text (marks it read
 kaist-mail download ID --out ~/Downloads    # its attachments
 ```
 
-Add `--json` before the command for agent-friendly output. `kaist-mail --help` is the full manual: workflow, JSON
-contract, exit codes and safety.
+Add `--json` before the command for agent-friendly output. Reading bodies costs agents far more than listing rows,
+so put a word you expect in the body into the search (`search --body 재학연한`) and read just the part around it
+(`read ID --find 재학연한 --max-chars 400`). `kaist-mail --help` is the full manual: workflow, JSON contract, exit
+codes and safety.
 
 ## Development
 

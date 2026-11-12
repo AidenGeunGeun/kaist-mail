@@ -21,7 +21,7 @@ What kaist-mail can do now, what is proven live, and what comes next.
 | `folders` | yes | yes |
 | Session renewal without the phone (SSO session, remembered password) | yes | no |
 | `list`, `search` (thin rows, cursors past the 2000-hit cap) | yes | yes |
-| `read` (bounded text, marks read), `download`, `export` (leaves unread) | yes | yes, small files |
+| `read` (bounded text, `--find` window, marks read), `download`, `export` (leaves unread) | yes | yes, small files (`--find` synthetic only) |
 | Release archive, checksum, `scripts/install.sh` (Apple Silicon) | yes | local smoke only; no release published |
 | Large transfers (several MB) | yes: up to 5 whole attempts within --max-seconds | yes, EML to 30 MB, attachment 13.9 MB |
 
@@ -30,9 +30,9 @@ What kaist-mail can do now, what is proven live, and what comes next.
 1. Live renewal, as three separate results: SSO-session replay (`auth renew` after a fresh login), automatic recovery
    when Dooray actually rejects an idle session (next day, after sleep), and password renewal (blocked until the
    account's password change, SS0006).
-2. Agent workflow measurements on a synthetic large mailbox: task cost in commands, requests, bytes and tokens.
-3. Tag `v0.1.0` once the workflow measurements land (the archive ships README.md).
-4. IMAP: `imap.gov-dooray.com:993` answers, but Dooray says public institutions get no IMAP and KAIST closed
+2. Measure on the synthetic mailbox (`uv run bench/run.py`) before changing defaults. Open candidates: multi-id `read`
+   (triage costs about 26 commands), `download` by file name, gzip for wapi JSON on slow links.
+3. IMAP: `imap.gov-dooray.com:993` answers, but Dooray says public institutions get no IMAP and KAIST closed
    Outlook/iOS Mail access in 2021. Waiting on the user to check Settings -> Mail -> IMAP in the web app.
 
 ## Open questions

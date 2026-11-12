@@ -21,7 +21,7 @@ Dooray endpoints are in [PROTOCOL.md](PROTOCOL.md).
   passing the 2000-hit cap.
   `message`: Dooray list item to the thin row and human table. `time`: RFC 3339 and KST date bounds.
 - `mail`: one message as an agent reads it: `MailId`, the detail fetch (marks read), headers, attachments, body
-  window. `html_text`: HTML body to plain text (html2text with a decorator: quotes `> `, links `text <url>`, images
+  window (NFC; `--find` starts it at the line holding the next match). `html_text`: HTML body to plain text (html2text with a decorator: quotes `> `, links `text <url>`, images
   `[alt]`).
 - `download`: `download` (attachments) and `export` (raw EML) to new private files; filename sanitizing and
   caseless collision checks. `client/transfer`: streaming transfers under `--max-seconds`/`--stall-seconds` with
@@ -52,3 +52,10 @@ Easy Login or sends a code. `state/session.lock` serializes sign-in, renewal and
 gates every automatic password use: it is written before the password leaves and cleared only when KAIST accepts it,
 so a refused, cut-off or code-requiring attempt is never repeated until the next explicit `auth login`.
 `state/session.used` records the last accepted call.
+
+## Benchmark
+
+`bench/` sits outside the crate. `dooray.py` builds a seeded synthetic mailbox at real scale (8,343 inbox messages,
+2,785 unread) and a loopback Dooray emulation from the test fixtures; `run.py` runs scripted agent workflows with
+known answers through the release binary and reports commands, requests, wire bytes, o200k_base tokens and time.
+Run `cargo build --release --locked && uv run bench/run.py [--latency-ms 300]`.
