@@ -26,8 +26,12 @@ What kaist-mail can do now, what is proven live, and what comes next.
 
 ## Next
 
-1. Live check of renewal: SSO-session reuse after a fresh login; password renewal after the account's password change.
-2. Workflow measurements on a synthetic large mailbox.
+1. Live renewal, as three separate results: SSO-session replay (`auth renew` after a fresh login), automatic recovery
+   when Dooray actually rejects an idle session (next day, after sleep), and password renewal (blocked until the
+   account's password change, SS0006).
+2. Agent workflow measurements on a synthetic large mailbox: task cost in commands, requests, bytes and tokens.
+3. Installable release: archive, checksum, `install.sh`, release smoke.
+4. Whether KAIST's tenant allows IMAP with a dedicated password (unattended access, whole raw messages).
 
 ## Open questions
 
