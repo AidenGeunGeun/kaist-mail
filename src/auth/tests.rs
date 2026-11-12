@@ -735,7 +735,7 @@ fn waiting_for_the_session_lock_is_bounded() {
     let _ = store::lock_session(&path, Duration::ZERO, None);
     let overhead = started.elapsed();
     let started = Instant::now();
-    let error = store::lock_session(&path, Duration::from_millis(10), None)
+    let error = store::lock_session(&path, Duration::from_millis(1), None)
         .err()
         .unwrap();
     assert_eq!(error.code, "NETWORK_ERROR");
