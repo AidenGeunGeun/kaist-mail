@@ -108,8 +108,11 @@ Move, delete and send endpoints live in the same web-app module and are not mapp
 - `downloadUrl` is `/mails/{id}/parts/{n}?type=raw&t=...` from the site root: same-origin, no redirects, needs only
   `SESSION`, `Content-Length` equals `size`. `t` is not required; without `type=raw` the URL answers 400 HTML, and
   prefixing `/v2/wapi` returns error `-100300`.
-- `Range` is ignored (200, full length, no `Accept-Ranges`). Transfers of a few MB or more are sometimes closed
-  10-35 KB short of `Content-Length`, over HTTP/1.1 and HTTP/2 alike; a repeat of the same item can complete.
+- `Range` is ignored (200, full length, no `Accept-Ranges`), and `type=raw` ignores `Accept-Encoding: gzip`. The raw
+  EML endpoint often ends transfers early, over HTTP/1.1 and HTTP/2 alike: up to 21 MB usually 11-65 KB short of
+  `Content-Length`, 24-35 MB often at 65-84% of it; slow clients fail more, and a repeat can complete (about a quarter
+  of attempts did on a ~100 KB/s link, 2026-11-12). Attachment parts completed every time, 13.9 MB included.
+  `mailSummary.mimeSize` equals the EML's `Content-Length`.
 - Take the filename from `fileList[].name`. `Content-Disposition` depends on the User-Agent and can omit the
   filename entirely for non-ASCII names.
 

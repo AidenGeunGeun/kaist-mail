@@ -25,7 +25,8 @@ Dooray endpoints are in [PROTOCOL.md](PROTOCOL.md).
   `[alt]`).
 - `download`: `download` (attachments) and `export` (raw EML) to new private files; filename sanitizing and
   caseless collision checks. `client/transfer`: streaming transfers under `--max-seconds`/`--stall-seconds` with
-  exact-size checks. `private_fs::publish_new`: no-overwrite publication (hidden 0600 temporary, link or copy).
+  exact-size checks, restarting a transfer Dooray cuts short (up to 5 attempts); one absolute deadline bounds every
+  request, renewal step, keychain call and lock wait of the command. `private_fs::publish_new`: no-overwrite publication (hidden 0600 temporary, link or copy).
 - `http`: one blocking transport with per-hop redirect policy, deadlines and bounded reads; a 307/308 never re-sends
   a body to another origin.
 - `output`, `error`: the JSON envelope, terminal sanitization (control and bidi characters only), error codes.
