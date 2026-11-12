@@ -15,7 +15,8 @@ endpoints, so the CLI uses these web endpoints.
 - gzip is honoured. Responses over a few MB are slow (a 9 MB EML took about 49 s); stream downloads
   with long timeouts and keep list pages at 100 items or fewer.
 - `members/me` `sessionCheckedAt` moves with interactive calls but not with `Dooray-User-Interaction: false`; Dooray
-  exposes no remaining session time. An anonymous `SESSION` survived 50 min idle.
+  exposes no remaining session time. An anonymous `SESSION` survived 50 min idle. Dooray's security guide makes the
+  web session length an administrator setting of up to 15 days; KAIST's value is unpublished.
 - Signed out or expired: wapi returns 401 with an empty body; `/mails/*/parts` returns 401 `text/html`;
   page routes 302 to `/auth/signin`.
 
