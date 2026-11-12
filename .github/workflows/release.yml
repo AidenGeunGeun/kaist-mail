@@ -1,0 +1,67 @@
+name: release
+
+# A pushed v* tag publishes a release; a manual run only builds and smoke-tests the archive.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Package aarch64-apple-darwin
+    # Apple Silicon only: password storage uses the macOS keychain.
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a # 1.86.0
+        with:
+          components: clippy,rustfmt
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny
+      - name: Check
+        run: make check
+      - name: Package and smoke-test the archive
+        run: make smoke
+      - name: Match the tag to the packaged version
+        if: github.ref_type == 'tag'
+        run: |
+          test -f "dist/kaist-mail-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz" ||
+            { echo "::error::tag $GITHUB_REF_NAME does not match the Cargo.toml version"; exit 1; }
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: github.event_name == 'push'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: Publish tag assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
