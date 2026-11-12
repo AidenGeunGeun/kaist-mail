@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/AidenGeunGeun/kaist-mail/main/scrip
 
 The installer downloads the latest release, checks its SHA-256 and puts `kaist-mail` in `~/.local/bin`, with no
 sudo. If that directory is not on your PATH it prints the line to add to `~/.zshrc`. Run it again to upgrade.
-`KAIST_MAIL_VERSION=v0.1.0` picks a release and `KAIST_MAIL_INSTALL_DIR` another directory. Install with the script
+`KAIST_MAIL_VERSION=v0.1.1` picks a release and `KAIST_MAIL_INSTALL_DIR` another directory. Install with the script
 rather than through a browser: macOS blocks a browser-downloaded binary because it is not notarized.
 
 On an Intel Mac, or from source with Rust: `make build`, then copy `target/release/kaist-mail` onto your PATH.

@@ -1,6 +1,6 @@
 [package]
 name = "kaist-mail"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.86"
 description = "An agent-friendly CLI for KAIST Dooray mail"
