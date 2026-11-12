@@ -4,6 +4,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
@@ -324,41 +325,52 @@ fn export_saves_the_raw_message_byte_for_byte_without_reading_it() {
 }
 
 #[test]
-fn transfers_dooray_cuts_short_start_over_and_give_up_after_five_attempts() {
+fn transfers_dooray_cuts_short_start_over_until_five_attempts_or_the_deadline() {
     let home = Home::new(Some(&live()));
     let out = TempDir::new().unwrap();
     let dir = out.path().to_str().unwrap();
-    let pdf = file_bytes(152_031, 1);
-    let served = AtomicUsize::new(0);
+    let raws = AtomicUsize::new(0);
+    let docxs = AtomicUsize::new(0);
     let server = Server::new(move |request: &Request| match request.target.as_str() {
         DETAIL_PATH => Response::bytes("application/json;charset=UTF-8", DETAIL),
-        PDF_PATH if served.fetch_add(1, Ordering::Relaxed) == 0 => {
-            Response::bytes("application/pdf", &pdf[..122_031]).declared_length(152_031)
+        // The retry's whole answer is shorter than the cut one, so leftovers would show.
+        RAW_PATH if raws.fetch_add(1, Ordering::Relaxed) == 0 => {
+            Response::bytes("message/rfc822", &RAW[..RAW.len() / 2])
+                .declared_length(RAW.len() as u64)
         }
-        PDF_PATH => Response::bytes("application/pdf", pdf.clone()),
-        RAW_PATH => Response::bytes("message/rfc822", &RAW[..RAW.len() / 2])
-            .declared_length(RAW.len() as u64),
+        RAW_PATH => Response::bytes("message/rfc822", &RAW[..20]),
+        PDF_PATH => Response::bytes("application/pdf", &file_bytes(152_031, 1)[..122_031])
+            .declared_length(152_031),
+        DOCX_PATH => {
+            if docxs.fetch_add(1, Ordering::Relaxed) > 0 {
+                std::thread::sleep(Duration::from_millis(1_500));
+            }
+            Response::bytes("application/octet-stream", vec![0; 100]).declared_length(28_417)
+        }
         other => panic!("unexpected request {other}"),
     });
-    let output = home.run(
-        Some(&server),
-        &["--json", "download", ID, "--part", "3", "--out", dir],
-    );
-    assert!(output.status.success(), "{output:?}");
+
+    let export = home.run(Some(&server), &["--json", "export", ID, "--out", dir]);
+    assert!(export.status.success(), "{export:?}");
+    let export = envelope(&export.stdout);
+    let eml = out.path().join(export["data"]["path"].as_str().unwrap());
     assert!(
-        fs::read(out.path().join(PDF_NAME)).unwrap() == file_bytes(152_031, 1),
-        "the saved PDF is not the whole served file"
+        fs::read(eml).unwrap() == RAW[..20],
+        "the EML is not the whole answer"
     );
-    let warnings = &envelope(&output.stdout)["warnings"];
+    let warnings = &export["warnings"];
     assert!(
         warnings[0]
             .as_str()
-            .is_some_and(|warning| warning.contains("122031 of 152031 bytes")),
+            .is_some_and(|warning| warning.contains(&format!("of {} bytes", RAW.len()))),
         "{warnings}"
     );
 
-    let export = home.run(Some(&server), &["--json", "export", ID, "--out", dir]);
-    let error = &envelope(&export.stderr)["error"];
+    let pdf = home.run(
+        Some(&server),
+        &["--json", "download", ID, "--part", "3", "--out", dir],
+    );
+    let error = &envelope(&pdf.stderr)["error"];
     assert_eq!(error["code"], "NETWORK_ERROR");
     assert!(
         error["message"].as_str().unwrap().contains("5 attempts"),
@@ -367,9 +379,32 @@ fn transfers_dooray_cuts_short_start_over_and_give_up_after_five_attempts() {
     assert_eq!(
         fs::read_dir(out.path()).unwrap().count(),
         1,
-        "only the PDF, no partial or temporary file"
+        "only the EML, no partial or temporary file"
     );
+
+    let limits = ["--max-seconds", "1"];
+    let docx = home.run(
+        Some(&server),
+        &[
+            &["--json", "download", ID, "--part", "4", "--out", dir][..],
+            &limits,
+        ]
+        .concat(),
+    );
+    let error = &envelope(&docx.stderr)["error"];
+    assert!(
+        error["message"].as_str().unwrap().contains("on attempt 2")
+            && error["hint"]
+                .as_str()
+                .unwrap()
+                .contains("larger --max-seconds"),
+        "{error}"
+    );
+
     let requests = server.requests();
     let count = |path: &str| requests.iter().filter(|line| line.contains(path)).count();
-    assert_eq!((count(PDF_PATH), count(RAW_PATH)), (2, 5));
+    assert_eq!(
+        (count(RAW_PATH), count(PDF_PATH), count(DOCX_PATH)),
+        (2, 5, 2)
+    );
 }

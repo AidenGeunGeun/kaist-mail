@@ -121,7 +121,7 @@ pub fn record_use(base_url: &Url) {
     if !matches!(store::read_session(&path, base_url), Ok(Some(session)) if longer(&session)) {
         return;
     }
-    let Ok(_lock) = store::lock_session(&dirs.session_lock(), Duration::ZERO) else {
+    let Ok(_lock) = store::lock_session(&dirs.session_lock(), Duration::ZERO, None) else {
         return;
     };
     if let Ok(Some(mut session)) = store::read_session(&path, base_url) {
@@ -146,7 +146,7 @@ fn with_env<T>(
         sso: &sso,
         timeout,
         deadline,
-        keychain: &Keychain::system().unattended().until(deadline),
+        keychain: &Keychain::system().unattended(),
         interactive: false,
         code: CodeStep::Refuse,
         json: true,
@@ -170,7 +170,7 @@ pub(super) struct Renewed {
 
 pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed, AppError> {
     let path = env.dirs.session();
-    let _lock = store::lock_session(&env.dirs.session_lock(), env.lock_wait())?;
+    let _lock = env.lock_session()?;
     let now = epoch_now();
     let mut stored = store::read_session(&path, env.dooray)?
         .ok_or_else(|| AppError::auth_required("there is no saved Dooray session to renew"))?;
@@ -217,10 +217,13 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
                 record.via = Some(Via::SsoSession);
                 match adopt(env, completed, Some(record.clone())) {
                     Ok(header) => return Ok(renewed(header, &record)),
-                    Err(error) => reasons.push(format!(
-                        "Dooray refused the session from the KAIST SSO session: {}",
-                        error.message
-                    )),
+                    Err(error) => {
+                        reasons.push(format!(
+                            "Dooray did not take the session from the KAIST SSO session: {}",
+                            error.message
+                        ));
+                        keep_network(&mut network, error);
+                    }
                 }
                 record.via = None;
             }
@@ -237,7 +240,7 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
                     "could not reuse the KAIST SSO session: {}",
                     error.message
                 ));
-                network = network.or((error.code == "NETWORK_ERROR").then_some(error));
+                keep_network(&mut network, error);
             }
         }
     }
@@ -264,14 +267,17 @@ pub(super) fn renew_with(env: &Env<'_>, trigger: Trigger<'_>) -> Result<Renewed,
                     record.via = Some(Via::Password);
                     match adopt(env, completed, Some(record.clone())) {
                         Ok(header) => return Ok(renewed(header, &record)),
-                        Err(error) => reasons.push(error.message),
+                        Err(error) => {
+                            reasons.push(error.message.clone());
+                            keep_network(&mut network, error);
+                        }
                     }
                     record.via = None;
                 }
                 Err(error) => {
                     reasons.push(error.message.clone());
                     hint = error.hint.clone();
-                    network = network.or((error.code == "NETWORK_ERROR").then_some(error));
+                    keep_network(&mut network, error);
                 }
             }
         }
@@ -334,6 +340,14 @@ fn renewed(header: String, record: &Renewal) -> Renewed {
     }
 }
 
+/// Keep the first network failure: a retry can succeed, so the renewal
+/// reports it instead of asking for a login.
+fn keep_network(network: &mut Option<AppError>, error: AppError) {
+    if network.is_none() && error.code == "NETWORK_ERROR" {
+        *network = Some(error);
+    }
+}
+
 /// A password login with the remembered password that succeeds only when
 /// KAIST asks for no second factor, which it skips for a trusted device.
 fn password_login(
@@ -341,9 +355,12 @@ fn password_login(
     identity: Identity,
     devices: &[String],
 ) -> Result<flow::CompletedLogin, AppError> {
-    let password = env.keychain.lookup(&identity.username)?.ok_or_else(|| {
-        AppError::auth_expired("the remembered password is no longer in the keychain")
-    })?;
+    let password = env
+        .keychain
+        .lookup(&identity.username, env.deadline)?
+        .ok_or_else(|| {
+            AppError::auth_expired("the remembered password is no longer in the keychain")
+        })?;
     let hold_unresolved = || store::write_hold(&env.dirs.password_hold(), PasswordHold::Unresolved);
     let begun = flow::begin(
         Attempt {

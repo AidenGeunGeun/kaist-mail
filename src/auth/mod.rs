@@ -226,12 +226,13 @@ struct Env<'a> {
 }
 
 impl Env<'_> {
-    /// How long to wait for another sign-in, renewal or sign-out.
-    fn lock_wait(&self) -> Duration {
-        let wait = Duration::from_secs(self.timeout);
-        self.deadline.map_or(wait, |deadline| {
-            wait.min(deadline.saturating_duration_since(Instant::now()))
-        })
+    /// Take the session lock, waiting for another sign-in, renewal or sign-out.
+    fn lock_session(&self) -> Result<store::SessionLock, AppError> {
+        store::lock_session(
+            &self.dirs.session_lock(),
+            Duration::from_secs(self.timeout),
+            self.deadline,
+        )
     }
 }
 
@@ -284,7 +285,7 @@ fn login_with(
 ) -> Result<CommandResult, AppError> {
     // From reading the stored password to saving the session: one sign-in
     // or renewal at a time, so none resends a password another just had refused.
-    let _lock = store::lock_session(&env.dirs.session_lock(), env.lock_wait())?;
+    let _lock = env.lock_session()?;
     if let Some(code) = &options.code {
         return resume_login(env, code);
     }
@@ -505,7 +506,7 @@ fn stored_password(
     let Some(found) = remembered else {
         return Ok(None);
     };
-    match env.keychain.lookup(&found.username) {
+    match env.keychain.lookup(&found.username, env.deadline) {
         Err(error) if env.interactive => {
             warnings.push(format!(
                 "could not read the stored password ({}); asking for it instead",
@@ -531,7 +532,7 @@ fn drop_rejected_password(
     let mut removed = true;
     if let Some(mut identity) = remembered {
         identity.password_saved = false;
-        if let Err(cleared) = env.keychain.clear(&identity.username) {
+        if let Err(cleared) = env.keychain.clear(&identity.username, env.deadline) {
             removed = false;
             warnings.push(format!(
                 "could not remove the rejected password from the keychain: {}",
@@ -577,7 +578,7 @@ fn remember_login(
     identity.password_saved = same.is_some_and(|found| found.password_saved);
     // A different account: its password must not linger.
     if let Some(old) = previous.filter(|found| found.username != username && found.password_saved) {
-        if let Err(error) = env.keychain.clear(&old.username) {
+        if let Err(error) = env.keychain.clear(&old.username, env.deadline) {
             warnings.push(format!(
                 "could not remove the stored password of {}: {}",
                 old.username, error.message
@@ -585,7 +586,7 @@ fn remember_login(
         }
     }
     if let Some(password) = new_password {
-        match env.keychain.store(&username, password) {
+        match env.keychain.store(&username, password, env.deadline) {
             Ok(()) => {
                 identity.password_saved = true;
                 settle_hold(env, Settle::Clear, warnings);
@@ -597,7 +598,7 @@ fn remember_login(
                 ));
                 // The old password is now stale: never keep using it.
                 if std::mem::take(&mut identity.password_saved) {
-                    if let Err(error) = env.keychain.clear(&username) {
+                    if let Err(error) = env.keychain.clear(&username, env.deadline) {
                         warnings.push(format!(
                             "the previously remembered password is no longer used but could not be removed: {}",
                             error.message
@@ -610,7 +611,7 @@ fn remember_login(
     if let Err(error) = store::save_json(&env.dirs.identity(), &identity, "remembered login") {
         warnings.push(format!("could not remember the login: {}", error.message));
         if new_password.is_some() && std::mem::take(&mut identity.password_saved) {
-            if let Err(error) = env.keychain.clear(&username) {
+            if let Err(error) = env.keychain.clear(&username, env.deadline) {
                 warnings.push(format!(
                     "could not roll back the stored password: {}; run `kaist-mail auth forget`",
                     error.message
@@ -712,7 +713,7 @@ pub fn logout(timeout: u64) -> Result<CommandResult, AppError> {
 
 fn logout_with(dirs: &Dirs, wait: Duration) -> Result<CommandResult, AppError> {
     // A renewal in flight finishes first, so it cannot bring the session back.
-    let _lock = store::lock_session(&dirs.session_lock(), wait)?;
+    let _lock = store::lock_session(&dirs.session_lock(), wait, None)?;
     let path = dirs.session();
     let mut warnings = Vec::new();
     let removed = store::remove_owned(&path, "Dooray session", &mut warnings);

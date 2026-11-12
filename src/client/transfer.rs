@@ -115,6 +115,11 @@ impl Client {
                         })?;
                 }
                 Err(Failed::Final(mut error)) => {
+                    if Instant::now() >= limits.deadline {
+                        error = error.with_hint(
+                            "Dooray can be slow and cut transfers short; allow more time with a larger --max-seconds",
+                        );
+                    }
                     if !cuts.is_empty() {
                         error.message = format!(
                             "{} on attempt {}, after: {}",

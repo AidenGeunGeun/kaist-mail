@@ -307,7 +307,7 @@ impl Fixture {
             Identity::new("student", LoginMethod::Password, Some(SecondFactor::Email));
         identity.password_saved = true;
         store::save_json(&self.dirs.identity(), &identity, "remembered login").unwrap();
-        self.keychain.store("student", "s3cret").unwrap();
+        self.keychain.store("student", "s3cret", None).unwrap();
     }
 
     /// Renew as a command does once Dooray rejected `SESSION=authed`.
@@ -480,7 +480,7 @@ fn sso_results_map_by_code_whatever_the_message_language() {
         let error = fixture.login(&password(), false).unwrap_err();
         assert_eq!(error.code, "CREDENTIALS_REJECTED", "{message}");
         // A rejected stored password must never be resent.
-        assert!(fixture.keychain.lookup("student").unwrap().is_none());
+        assert!(fixture.keychain.lookup("student", None).unwrap().is_none());
         let identity = store::load_identity(&fixture.dirs.identity())
             .unwrap()
             .unwrap();
@@ -710,7 +710,7 @@ fn login_holds_the_session_lock_from_reading_the_password_to_saving_the_session(
     let fixture = Fixture::new(Variant::Normal);
     fixture.remember_password();
     *fixture.password_result.lock().unwrap() = r#"{"result_code":"EAU001"}"#.to_owned();
-    let held = store::lock_session(&fixture.dirs.session_lock(), Duration::ZERO).unwrap();
+    let held = store::lock_session(&fixture.dirs.session_lock(), Duration::ZERO, None).unwrap();
 
     std::thread::scope(|scope| {
         let login = scope.spawn(|| fixture.login(&password_login(), false));
@@ -729,11 +729,17 @@ fn login_holds_the_session_lock_from_reading_the_password_to_saving_the_session(
 fn waiting_for_the_session_lock_is_bounded() {
     let fixture = Fixture::new(Variant::Normal);
     let path = fixture.dirs.session_lock();
-    let _held = store::lock_session(&path, Duration::ZERO).unwrap();
-    let error = store::lock_session(&path, Duration::from_millis(200))
+    let _held = store::lock_session(&path, Duration::ZERO, None).unwrap();
+    let started = Instant::now();
+    let error = store::lock_session(&path, Duration::from_millis(10), None)
         .err()
         .unwrap();
     assert_eq!(error.code, "NETWORK_ERROR");
+    assert!(
+        started.elapsed() < Duration::from_millis(40),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -889,42 +895,65 @@ fn renewal_while_kaist_is_unreachable_keeps_the_password_usable() {
 
 #[test]
 fn every_wait_of_a_renewal_ends_at_the_command_deadline() {
-    let slow_check = Fixture::expired();
-    slow_check
-        .state
-        .folders_pause
-        .store(1_500, Ordering::SeqCst);
+    let slow_sso_check = Fixture::expired();
+    let slow_password_check = by_password();
+    *slow_password_check.password_result.lock().unwrap() = r#"{"result_code":"SS0001"}"#.to_owned();
+    for slow in [&slow_sso_check, &slow_password_check] {
+        slow.state.folders_pause.store(1_500, Ordering::SeqCst);
+    }
     let locked = Fixture::expired();
-    let _held = store::lock_session(&locked.dirs.session_lock(), Duration::ZERO).unwrap();
-    let hung_keychain = by_password();
+    let _held = store::lock_session(&locked.dirs.session_lock(), Duration::ZERO, None).unwrap();
+    let mut hung_keychain = by_password();
+    let bin = hung_keychain.root.path().join("bin");
+    hung_keychain.keychain.program = secret::tests::script(&bin, "hung-security", "sleep 10");
 
-    for (case, fixture) in [
-        ("checking the new session", &slow_check),
-        ("waiting for the session lock", &locked),
-        ("reading the password", &hung_keychain),
+    for (case, fixture, code, says) in [
+        (
+            "checking the SSO session's login",
+            &slow_sso_check,
+            "NETWORK_ERROR",
+            "could not renew",
+        ),
+        (
+            "checking the password's login",
+            &slow_password_check,
+            "NETWORK_ERROR",
+            "could not renew",
+        ),
+        (
+            "waiting for the session lock",
+            &locked,
+            "NETWORK_ERROR",
+            "--max-seconds",
+        ),
+        (
+            "reading the password",
+            &hung_keychain,
+            "AUTH_EXPIRED",
+            "--max-seconds",
+        ),
     ] {
-        let bin = fixture.root.path().join("bin");
-        let mut keychain =
-            secret::tests::fake_security(&bin, &fixture.root.path().join("keychain"));
-        if case == "reading the password" {
-            keychain.program = secret::tests::script(&bin, "hung-security", "sleep 10");
-        }
         let started = Instant::now();
-        let deadline = started + Duration::from_millis(500);
-        let keychain = keychain.until(Some(deadline));
         let env = Env {
             dirs: &fixture.dirs,
             dooray: &fixture.dooray_url,
             sso: &fixture.sso_url,
             timeout: 5,
-            deadline: Some(deadline),
-            keychain: &keychain,
+            deadline: Some(started + Duration::from_millis(500)),
+            keychain: &fixture.keychain,
             interactive: false,
             code: CodeStep::Refuse,
             json: true,
         };
-        let renewed = renew::renew_with(&env, renew::Trigger::Rejected("SESSION=authed"));
-        assert!(renewed.is_err(), "{case}");
+        let error = renew::renew_with(&env, renew::Trigger::Rejected("SESSION=authed"))
+            .err()
+            .unwrap_or_else(|| panic!("{case}: renewed"));
+        assert!(
+            error.code == code && error.message.contains(says),
+            "{case}: {} {}",
+            error.code,
+            error.message
+        );
         assert!(
             started.elapsed() < Duration::from_millis(1_200),
             "{case} took {:?}",

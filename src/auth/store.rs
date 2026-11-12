@@ -424,9 +424,14 @@ pub struct SessionLock {
     _file: fs::File,
 }
 
-/// Take the session lock, waiting up to `wait` for another kaist-mail
-/// process to finish signing in, renewing or signing out.
-pub fn lock_session(path: &Path, wait: Duration) -> Result<SessionLock, AppError> {
+/// Take the session lock, waiting up to `wait`, and not past the command's
+/// `deadline` (`--max-seconds`), for another kaist-mail process to finish
+/// signing in, renewing or signing out.
+pub fn lock_session(
+    path: &Path,
+    wait: Duration,
+    deadline: Option<Instant>,
+) -> Result<SessionLock, AppError> {
     use rustix::{fs::FlockOperation, io::Errno};
     private_parent(path, "lock")?;
     let file = crate::private_fs::private_file_options()
@@ -434,17 +439,23 @@ pub fn lock_session(path: &Path, wait: Duration) -> Result<SessionLock, AppError
         .truncate(false)
         .open(path)
         .map_err(|error| AppError::config(format!("cannot open {}: {error}", path.display())))?;
-    let deadline = Instant::now() + wait;
+    let waited = Instant::now() + wait;
+    let cut = deadline.filter(|deadline| *deadline < waited);
+    let until = cut.unwrap_or(waited);
     loop {
+        let left = until.saturating_duration_since(Instant::now());
         match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => return Ok(SessionLock { _file: file }),
-            Err(Errno::WOULDBLOCK) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
+            Err(Errno::WOULDBLOCK) if !left.is_zero() => {
+                std::thread::sleep(left.min(Duration::from_millis(50)));
             }
             Err(Errno::WOULDBLOCK) => {
+                let when = match cut {
+                    Some(_) => "when the command's --max-seconds ran out".to_owned(),
+                    None => format!("after {} s", wait.as_secs()),
+                };
                 return Err(AppError::network(format!(
-                    "another kaist-mail sign-in or renewal was still running after {} s",
-                    wait.as_secs()
+                    "another kaist-mail sign-in or renewal was still running {when}"
                 ))
                 .with_hint("Retry when the other kaist-mail command has finished."));
             }
