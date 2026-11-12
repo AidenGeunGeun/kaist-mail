@@ -730,14 +730,18 @@ fn waiting_for_the_session_lock_is_bounded() {
     let fixture = Fixture::new(Variant::Normal);
     let path = fixture.dirs.session_lock();
     let _held = store::lock_session(&path, Duration::ZERO, None).unwrap();
+    // Measured against a zero-wait attempt so slow CI file opens do not count; a whole 50 ms poll past the wait does.
+    let started = Instant::now();
+    let _ = store::lock_session(&path, Duration::ZERO, None);
+    let overhead = started.elapsed();
     let started = Instant::now();
     let error = store::lock_session(&path, Duration::from_millis(10), None)
         .err()
         .unwrap();
     assert_eq!(error.code, "NETWORK_ERROR");
     assert!(
-        started.elapsed() < Duration::from_millis(40),
-        "{:?}",
+        started.elapsed() < overhead + Duration::from_millis(40),
+        "{:?} with {overhead:?} overhead",
         started.elapsed()
     );
 }
