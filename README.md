@@ -24,7 +24,9 @@ On an Intel Mac, or from source with Rust: `make build`, then copy `target/relea
 Sign in with `kaist-mail auth login`: enter your KAIST ID and approve the number shown in the KAIST app (Easy Login).
 The CLI remembers your ID and method.
 
-When Dooray drops the session, the next command renews it once without your phone: first from the saved KAIST SSO
+To stay signed in, run `kaist-mail auth extend` on a schedule (a launchd job every 15 minutes, as klms users do
+with `klms auth extend`); each run is one cheap call that restarts Dooray's idle timer. When Dooray drops the
+session anyway, the next command renews it once without your phone: first from the saved KAIST SSO
 session, then, if you opted in, with a password kept in the macOS keychain
 (`kaist-mail auth login --method password --remember-password`). When neither works, commands fail with
 `AUTH_EXPIRED` and you run `kaist-mail auth login` again. `kaist-mail auth status` shows where you stand.
