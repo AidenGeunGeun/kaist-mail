@@ -784,20 +784,12 @@ fn a_refused_password_that_cannot_be_removed_is_still_never_resent() {
     fixture.remember_password();
     *fixture.password_result.lock().unwrap() = r#"{"result_code":"EAU001"}"#.to_owned();
     fixture.fail_keychain_delete();
-    // An immutable login.json keeps naming the password as stored.
-    let immutable = |flag| {
-        let identity = fixture.dirs.identity();
-        let status = std::process::Command::new("chflags")
-            .arg(flag)
-            .arg(identity)
-            .status();
-        assert!(status.unwrap().success());
-    };
-    immutable("uchg");
+    // A directory where login.json's temporary file goes keeps login.json naming the password as stored.
+    let temp = format!("login.json.{}.tmp", std::process::id());
+    fs::create_dir_all(fixture.dirs.config.join(temp).join("x")).unwrap();
 
     let error = fixture.renew().err().unwrap();
     let second = fixture.renew().err().unwrap();
-    immutable("nouchg");
     assert!(error.hint.unwrap().contains("could not remove it"));
     assert_eq!(second.code, "AUTH_EXPIRED");
     assert_eq!(fixture.password_posts(), 1);
